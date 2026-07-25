@@ -17,15 +17,10 @@
 
 var TOKEN_TTL_DAYS = 30;
 
-// Redirect allowlist — token is only ever handed to these origins.
-// ice2026.designthinking.lk stays until its redirect to the new canonical
-// host (ice.designthinking.lk) is live; drop it after cutover.
-var ALLOWED_REDIRECT_PREFIXES = [
-  'https://ice.designthinking.lk/',
-  'https://ice2026.designthinking.lk/',
-  'http://localhost:',
-  'http://127.0.0.1:',
-];
+// Redirect allowlist — the token is only ever handed to a trusted origin.
+// Every project lives on its own {slug}.designthinking.lk subdomain, so we
+// allow ANY https subdomain of designthinking.lk (wildcard) — new projects work
+// with no allowlist edit — plus localhost for dev. See isAllowedRedirect_.
 
 function doGet(e) {
   var params = (e && e.parameter) || {};
@@ -122,9 +117,13 @@ function pageShell_(title, inner) {
 
 function isAllowedRedirect_(url) {
   if (!url) return false;
-  for (var i = 0; i < ALLOWED_REDIRECT_PREFIXES.length; i++) {
-    if (url.indexOf(ALLOWED_REDIRECT_PREFIXES[i]) === 0) return true;
-  }
+  // Any https single-level subdomain of designthinking.lk. The trailing
+  // (?:[/?#]|$) is what makes this safe against look-alikes: it rejects
+  // https://designthinking.lk.evil.com/ and https://x.designthinking.lk.evil.com/
+  // while allowing https://ice2027.designthinking.lk[/...|?...|#...].
+  if (/^https:\/\/[a-z0-9-]+\.designthinking\.lk(?:[/?#]|$)/i.test(url)) return true;
+  // Local dev.
+  if (url.indexOf('http://localhost:') === 0 || url.indexOf('http://127.0.0.1:') === 0) return true;
   return false;
 }
 
