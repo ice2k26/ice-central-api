@@ -28,7 +28,7 @@ var ADMIN_EMAILS = ['sankha@ahlab.org'];
 var DEFAULT_PROJECT = 'ice2026';
 var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 var REGISTRY_NAME = 'ICE Projects Registry';
-var PROJECT_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,29}$/;
+var PROJECT_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,15}$/;
 
 // The registry spreadsheet's tabs. `projects`: one row per workshop instance
 // (per-project config + storage pointers). `directory`: one row per person,
@@ -1273,9 +1273,9 @@ var ACTIONS = {
   // duplicating work (each step below is individually idempotent).
   admin_create_project: function (params, ctx) {
     if (!isAdminEmail_(ctx.email)) return { ok: false, error: 'forbidden', message: 'Global admins only.' };
-    var id = clean_(params.id, 30).toLowerCase();
+    var id = clean_(params.id, 16).toLowerCase();
     if (!PROJECT_SLUG_RE.test(id)) {
-      return { ok: false, error: 'validation', message: 'Project id must be 2–30 chars: lowercase letters, digits, hyphens.' };
+      return { ok: false, error: 'validation', message: 'Project id must be 2–16 chars: lowercase letters, digits, hyphens.' };
     }
     // The subdomain IS the project name — name defaults to the slug.
     var name = clean_(params.name, 60) || id;
