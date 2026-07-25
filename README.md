@@ -1,4 +1,4 @@
-# ICE — Backend (Google Apps Script)
+# ICE — Central API (`ice-central-api`, Google Apps Script)
 
 Two clasp-managed Apps Script web apps, deployed from sankha@ahlab.org:
 
