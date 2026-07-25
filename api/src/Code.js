@@ -1264,33 +1264,58 @@ var ACTIONS = {
     return { projects: readRegistry_('projects', true) };
   },
 
+  // Turnkey project creation: registry row + Google Sheet DB + Drive uploads
+  // folder + seeded admin member + Cloudflare subdomain, all done BEFORE we
+  // return, so the project is fully usable the moment it can be opened. The row
+  // is written first as status:'provisioning' and flipped to 'active' only when
+  // every step succeeds — so an accidental client refresh mid-create is safe
+  // (the request finishes server-side) and a retry RESUMES rather than
+  // duplicating work (each step below is individually idempotent).
   admin_create_project: function (params, ctx) {
     if (!isAdminEmail_(ctx.email)) return { ok: false, error: 'forbidden', message: 'Global admins only.' };
     var id = clean_(params.id, 30).toLowerCase();
     if (!PROJECT_SLUG_RE.test(id)) {
       return { ok: false, error: 'validation', message: 'Project id must be 2–30 chars: lowercase letters, digits, hyphens.' };
     }
-    if (getProject_(id, true)) return { ok: false, error: 'exists', message: 'A project with that id already exists.' };
-    var name = clean_(params.name, 60);
-    if (!name) return { ok: false, error: 'validation', message: 'Project name is required.' };
+    // The subdomain IS the project name — name defaults to the slug.
+    var name = clean_(params.name, 60) || id;
+
+    var existing = getProject_(id, true);
+    // A finished project is a genuine conflict; a half-built one resumes.
+    if (existing && existing.dbId && existing.status !== 'provisioning') {
+      return { ok: false, error: 'exists', message: 'A project with that id already exists.' };
+    }
     var now = new Date().toISOString();
-    var row = {
-      id: id,
-      name: name,
-      tagline: clean_(params.tagline, 200),
-      siteUrl: clean_(params.siteUrl, 200),
-      status: params.status === 'test' ? 'test' : 'active',
-      registrationOpen: 'true',
-      provisionAccounts: truthy_(params.provisionAccounts) ? 'true' : 'false',
-      // Database spreadsheet + uploads folder are created lazily on the
-      // project's first use (dbId_ / uploadsFolderId_ write them back here).
-      dbId: '',
-      uploadsFolderId: '',
-      createdAt: now,
-      updatedAt: now,
-    };
-    appendRegistryRow_('projects', row);
-    return { project: row };
+    if (!existing) {
+      appendRegistryRow_('projects', {
+        id: id,
+        name: name,
+        tagline: clean_(params.tagline, 200),
+        siteUrl: 'https://' + id + '.designthinking.lk',
+        status: 'provisioning',
+        registrationOpen: 'true',
+        provisionAccounts: 'true', // minting @designthinking.lk accounts is on by default
+        dbId: '',
+        uploadsFolderId: '',
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // Everything below is scoped to the NEW project — swap the global PROJ and
+    // always restore it (same save/restore pattern as the wallet-refresh path).
+    var savedProj = PROJ;
+    try {
+      PROJ = getProject_(id, true);
+      dbId_();               // create the project's Google Sheet DB (writes dbId back)
+      uploadsFolderId_();    // create the Drive uploads folder (writes it back)
+      seedAdminMember_(ctx); // seed the creating admin as an admin member
+      createDnsRecord_(id);  // proxied CNAME so the central-web Worker serves the subdomain
+      updateRegistryRowByKey_('projects', id, { status: 'active', updatedAt: new Date().toISOString() });
+    } finally {
+      PROJ = savedProj;
+    }
+    return { project: getProject_(id, true) };
   },
 
   admin_update_project: function (params, ctx) {
@@ -1382,6 +1407,7 @@ function listVisibleProjects_(ctx) {
   return readRegistry_('projects')
     .filter(function (p) {
       var status = p.status || 'active';
+      if (status === 'provisioning') return false; // still being set up — never in the switcher
       if (status === 'active') return true;
       if (status === 'test') return !!ctx.isAdmin || globalAdmin;
       return globalAdmin; // archived
@@ -1677,6 +1703,76 @@ function getProject_(slug, noCache) {
     }
   }
   return null;
+}
+
+/** Seed the creating admin as an admin member of the CURRENT project (PROJ must
+ *  already point at the new project). Idempotent — skips if a row already
+ *  exists, so a resumed create never double-seeds. Profile fields are prefilled
+ *  from the cross-project directory snapshot when available. */
+function seedAdminMember_(ctx) {
+  if (!ctx.email) return;
+  if (findUserByEmail_(ctx.email)) return;
+  var now = new Date().toISOString();
+  var dir = findDirectory_(ctx.email);
+  var snap = {};
+  try { snap = dir && dir.profile ? JSON.parse(dir.profile) : {}; } catch (e) { snap = {}; }
+  appendRow_('users', {
+    id: Utilities.getUuid(),
+    email: ctx.email,
+    name: snap.name || (dir && dir.name) || (ctx.user && ctx.user.name) || String(ctx.email).split('@')[0],
+    image: snap.image || '',
+    bio: snap.bio || '',
+    skills: jsonArr_(snap.skills || [], 30, 40),
+    affiliation: snap.affiliation || '',
+    expertise: snap.expertise || '',
+    gender: snap.gender || '',
+    links: jsonArr_(snap.links || [], 10, 300),
+    video: snap.video || '',
+    role: 'admin',
+    createdAt: now,
+    updatedAt: now,
+    workEmail: (dir && dir.workEmail) || (ctx.user && ctx.user.workEmail) || '',
+  });
+}
+
+/** Create the proxied CNAME {slug}.designthinking.lk -> designthinking-lk.github.io
+ *  so the central-web Worker (infra/worker.js in ice-central-web) serves the new
+ *  subdomain. proxied:true is REQUIRED — Worker routes only run for proxied
+ *  records. Idempotent: an already-existing record counts as success. Needs the
+ *  Script Properties CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID. */
+function createDnsRecord_(slug) {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('CLOUDFLARE_API_TOKEN');
+  var zone = props.getProperty('CLOUDFLARE_ZONE_ID');
+  if (!token || !zone) {
+    throw new Error('Cloudflare not configured — set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID in Script Properties.');
+  }
+  var resp = UrlFetchApp.fetch(
+    'https://api.cloudflare.com/client/v4/zones/' + zone + '/dns_records',
+    {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + token },
+      muteHttpExceptions: true,
+      payload: JSON.stringify({
+        type: 'CNAME',
+        name: slug + '.designthinking.lk',
+        content: 'designthinking-lk.github.io',
+        proxied: true,
+        comment: 'ICE project ' + slug + ' (auto-created)',
+      }),
+    }
+  );
+  var body = {};
+  try { body = JSON.parse(resp.getContentText() || '{}'); } catch (e) { body = {}; }
+  if (body.success) return true;
+  // 81053/81057 = "record already exists" — idempotent success on resume.
+  var errs = body.errors || [];
+  for (var i = 0; i < errs.length; i++) {
+    if (errs[i].code === 81053 || errs[i].code === 81057) return true;
+  }
+  var msg = errs.length ? (errs[0].code + ' ' + errs[0].message) : ('HTTP ' + resp.getResponseCode());
+  throw new Error('Cloudflare DNS create failed: ' + msg);
 }
 
 /** Directory row for a personal email, or null. */
