@@ -1072,17 +1072,49 @@ var ACTIONS = {
     return { roles: rolesOf_(rowById_('users', user.id)) };
   },
 
+  // Per-project purge: removes the person and everything they own IN THIS
+  // PROJECT ONLY. The cross-project directory (email <-> workEmail pool) and the
+  // @designthinking.lk account are intentionally KEPT so a re-invite reuses the
+  // same account; other projects' sheets are separate and untouched.
   admin_delete_user: function (params, ctx) {
     var user = rowById_('users', params.userId);
     if (!user) return { ok: false, error: 'notfound', message: 'User not found.' };
-    deleteRowById_('users', user.id);
-    // remove from teams
-    readTable_('teams').forEach(function (t) {
+    var uid = user.id;
+
+    // 1. Drive uploads (profile photo + intro video) in this project's uploads
+    //    folder — best-effort, never block the delete. External URLs (YouTube)
+    //    produce no fileId and are skipped.
+    [user.image, user.video].forEach(function (url) {
+      var fid = driveFileId_(url);
+      if (fid) { try { Drive.Files.remove(fid); } catch (e) { /* not ours / already gone */ } }
+    });
+
+    // 2. The profile row (also drops their skills from this project's aggregate).
+    deleteRowById_('users', uid);
+
+    // 3. Teams: pull from members; delete now-empty teams (+ their posts/links);
+    //    reassign a dangling creator to the first remaining member.
+    readTable_('teams', true).forEach(function (t) {
       var members = parseArr_(t.members);
-      if (members.indexOf(user.id) !== -1) {
-        updateRowById_('teams', t.id, { members: JSON.stringify(members.filter(function (m) { return m !== user.id; })) });
+      if (members.indexOf(uid) === -1 && t.creatorId !== uid) return;
+      var remaining = members.filter(function (m) { return m !== uid; });
+      if (remaining.length === 0) {
+        deleteRowsWhere_('team_links', function (r) { return r.teamId === t.id; });
+        deleteRowsWhere_('team_posts', function (r) { return r.teamId === t.id; });
+        deleteRowById_('teams', t.id);
+      } else {
+        var patch = { members: JSON.stringify(remaining) };
+        if (t.creatorId === uid) patch.creatorId = remaining[0];
+        updateRowById_('teams', t.id, patch);
       }
     });
+
+    // 4. Authored content in this project. Announcements are KEPT on purpose
+    //    (workshop-wide content), so they're not touched here.
+    deleteRowsWhere_('messages', function (r) { return r.senderId === uid || r.receiverId === uid; });
+    deleteRowsWhere_('team_posts', function (r) { return r.createdBy === uid; });
+    deleteRowsWhere_('team_links', function (r) { return r.createdBy === uid; });
+
     return {};
   },
 
@@ -2027,6 +2059,16 @@ function deleteRowsWhere_(name, predicate) {
   var rows = readTable_(name, true);
   var doomed = rows.filter(predicate).map(function (r) { return r.id; });
   doomed.forEach(function (id) { deleteRowById_(name, id); });
+}
+
+/** Pull a Drive fileId out of an upload URL (profile photo / video). Returns
+ *  null for external URLs (e.g. YouTube), which have no Drive file to remove. */
+function driveFileId_(url) {
+  var s = String(url || '');
+  var m = s.match(/lh3\.googleusercontent\.com\/d\/([\w-]+)/) ||
+          s.match(/drive\.google\.com\/(?:file\/d\/|uc\?[^#]*\bid=)([\w-]+)/) ||
+          s.match(/\/d\/([\w-]+)/);
+  return m ? m[1] : null;
 }
 
 function markMessagesRead_(ids) {
