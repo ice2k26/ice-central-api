@@ -1412,7 +1412,7 @@ function listVisibleProjects_(ctx) {
       if (status === 'test') return !!ctx.isAdmin || globalAdmin;
       return globalAdmin; // archived
     })
-    .map(function (p) { return { id: p.id, name: p.name, status: p.status || 'active' }; });
+    .map(function (p) { return { id: p.id, name: p.name, tagline: p.tagline, status: p.status || 'active' }; });
 }
 
 /** The profile subset stored in the directory for cross-project prefill. */
