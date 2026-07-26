@@ -1126,6 +1126,13 @@ var ACTIONS = {
     deleteRowsWhere_('team_links', function (r) { return r.createdBy === uid; });
     console.log('[delete] authored content (messages/posts/links) removed');
 
+    // 5. Their invite/allowlist entry — remove it so deletion is a full offboard
+    //    (otherwise they linger as a pending "Invited" row). Re-inviting brings
+    //    them back; the directory pool still makes the workEmail reuse.
+    var email = String(user.email || '').toLowerCase();
+    deleteRowsWhere_('invites', function (r) { return String(r.email || '').toLowerCase() === email; });
+    console.log('[delete] invite/allowlist entry removed (if any)');
+
     console.log('[delete] DONE user=%s in %sms — directory pool + @designthinking.lk account kept', uid, (new Date().getTime() - t0));
     return {};
   },
