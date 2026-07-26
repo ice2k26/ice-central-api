@@ -1080,20 +1080,26 @@ var ACTIONS = {
     var user = rowById_('users', params.userId);
     if (!user) return { ok: false, error: 'notfound', message: 'User not found.' };
     var uid = user.id;
+    var t0 = new Date().getTime();
+    console.log('[delete] START project=%s user=%s email=%s name=%s', PROJ.id, uid, user.email, user.name);
 
     // 1. Drive uploads (profile photo + intro video) in this project's uploads
     //    folder — best-effort, never block the delete. External URLs (YouTube)
     //    produce no fileId and are skipped.
-    [user.image, user.video].forEach(function (url) {
-      var fid = driveFileId_(url);
-      if (fid) { try { Drive.Files.remove(fid); } catch (e) { /* not ours / already gone */ } }
+    [['photo', user.image], ['video', user.video]].forEach(function (pair) {
+      var fid = driveFileId_(pair[1]);
+      if (!fid) { console.log('[delete] %s: no Drive file (skip)', pair[0]); return; }
+      try { Drive.Files.remove(fid); console.log('[delete] %s: removed Drive file %s', pair[0], fid); }
+      catch (e) { console.error('[delete] %s: Drive remove FAILED %s — %s', pair[0], fid, (e && e.message) || e); }
     });
 
     // 2. The profile row (also drops their skills from this project's aggregate).
     deleteRowById_('users', uid);
+    console.log('[delete] users row removed');
 
     // 3. Teams: pull from members; delete now-empty teams (+ their posts/links);
     //    reassign a dangling creator to the first remaining member.
+    var teamsTouched = 0, teamsDeleted = 0;
     readTable_('teams', true).forEach(function (t) {
       var members = parseArr_(t.members);
       if (members.indexOf(uid) === -1 && t.creatorId !== uid) return;
@@ -1102,19 +1108,25 @@ var ACTIONS = {
         deleteRowsWhere_('team_links', function (r) { return r.teamId === t.id; });
         deleteRowsWhere_('team_posts', function (r) { return r.teamId === t.id; });
         deleteRowById_('teams', t.id);
+        teamsDeleted++;
+        console.log('[delete] team "%s" (%s) now empty — deleted with its posts/links', t.name, t.id);
       } else {
         var patch = { members: JSON.stringify(remaining) };
-        if (t.creatorId === uid) patch.creatorId = remaining[0];
+        if (t.creatorId === uid) { patch.creatorId = remaining[0]; console.log('[delete] team "%s": creator reassigned to %s', t.name, remaining[0]); }
         updateRowById_('teams', t.id, patch);
+        teamsTouched++;
       }
     });
+    console.log('[delete] teams: %s updated, %s deleted', teamsTouched, teamsDeleted);
 
     // 4. Authored content in this project. Announcements are KEPT on purpose
     //    (workshop-wide content), so they're not touched here.
     deleteRowsWhere_('messages', function (r) { return r.senderId === uid || r.receiverId === uid; });
     deleteRowsWhere_('team_posts', function (r) { return r.createdBy === uid; });
     deleteRowsWhere_('team_links', function (r) { return r.createdBy === uid; });
+    console.log('[delete] authored content (messages/posts/links) removed');
 
+    console.log('[delete] DONE user=%s in %sms — directory pool + @designthinking.lk account kept', uid, (new Date().getTime() - t0));
     return {};
   },
 
