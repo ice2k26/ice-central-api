@@ -2400,7 +2400,9 @@ function sendInviteEmail_(to, role, replyTo) {
       PROJ.name + ' · Augmented Human Lab';
     var msg = {
       to: to,
-      subject: 'You’re invited to ' + PROJ.name,
+      // Unique per send (time-stamped) so Gmail doesn't thread repeat invites
+      // to the same address into one collapsed conversation.
+      subject: 'You’re invited to ' + PROJ.name + ' (' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, h:mm a') + ')',
       body: text,
       htmlBody: html,
       name: PROJ.name,
