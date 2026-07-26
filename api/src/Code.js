@@ -255,7 +255,7 @@ var AUTH_REQUIRED = {
   admin_add_role: 1, admin_remove_role: 1, admin_delete_user: 1, admin_set_config: 1, admin_provision_email: 1,
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
-  admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1,
+  admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
   wallet_link: 1,
 };
 
@@ -263,7 +263,7 @@ var ADMIN_REQUIRED = {
   admin_add_role: 1, admin_remove_role: 1, admin_delete_user: 1, admin_set_config: 1, admin_provision_email: 1,
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
-  admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1,
+  admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
 };
 
 // Mentors and admins may post announcements; edit/delete is author-or-admin.
@@ -1084,6 +1084,30 @@ var ACTIONS = {
       }
     });
     return {};
+  },
+
+  // Cross-project membership for the admin People view: maps each registered
+  // personal email to the list of project ids that person appears in, by
+  // scanning every provisioned project's users table. Admin-only; results are
+  // cheap on repeat (readTable_ is cached per project).
+  admin_user_projects: function (params, ctx) {
+    var map = {};
+    var savedProj = PROJ;
+    try {
+      readRegistry_('projects').forEach(function (p) {
+        if (!p.dbId) return; // not provisioned yet — no users table
+        PROJ = getProject_(p.id, true);
+        readTable_('users').forEach(function (u) {
+          var key = String(u.email || '').toLowerCase();
+          if (!key) return;
+          if (!map[key]) map[key] = [];
+          if (map[key].indexOf(p.id) === -1) map[key].push(p.id);
+        });
+      });
+    } finally {
+      PROJ = savedProj;
+    }
+    return { memberships: map };
   },
 
   admin_set_config: function (params, ctx) {
