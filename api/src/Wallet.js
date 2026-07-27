@@ -91,10 +91,13 @@ function createIceWalletClass() {
   // Minimal generic class — all branding (logo, colour, fields) lives on
   // the per-member object, so the class only needs its id. enableSmartTap
   // off (no NFC). notifyPreference lets Wallet surface field-update pushes.
+  // ONE_USER_ALL_DEVICES: a member's card syncs across THEIR OWN devices but
+  // cannot be shared/added to anyone else's wallet (no "share pass" option) —
+  // this is a personal event card, not a transferable ticket.
   var body = {
     id: classId,
     enableSmartTap: false,
-    multipleDevicesAndHoldersAllowedStatus: 'MULTIPLE_HOLDERS'
+    multipleDevicesAndHoldersAllowedStatus: 'ONE_USER_ALL_DEVICES'
   };
 
   var resp = UrlFetchApp.fetch(
@@ -303,6 +306,8 @@ function walletBuildObject_(user, cfg, fields) {
     id: walletObjectId_(cfg, PROJ.id, user.id),
     classId: cfg.classId,
     state: 'ACTIVE',
+    // personal card — not shareable to other people's wallets (mirrors class)
+    multipleDevicesAndHoldersAllowedStatus: 'ONE_USER_ALL_DEVICES',
     cardTitle: { defaultValue: { language: 'en-US', value: PROJ.name || 'ICE 2026' } },
     header:    { defaultValue: { language: 'en-US', value: fields.name || user.name } },
     subheader: { defaultValue: { language: 'en-US', value: fields.role || 'Member' } },
@@ -493,6 +498,24 @@ function patchIceWalletClassTemplate() {
       contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true }
   );
   Logger.log('patchIceWalletClassTemplate → %s\n%s', resp.getResponseCode(), resp.getContentText());
+}
+
+// ── One-off: lock the EXISTING class so passes can't be shared ──
+// createIceWalletClass() 409s (no-op) once the class exists, so the sharing
+// change to its body never lands on the live class. Run this once to PATCH it:
+// ONE_USER_ALL_DEVICES removes Google Wallet's "share pass" option, so nobody
+// can add another member's card to their own wallet. Applies to every already
+// installed pass within minutes. Idempotent — safe to re-run.
+function patchIceWalletClassSharing() {
+  var cfg = WALLET_config_();
+  var token = WALLET_accessToken_();
+  var body = { multipleDevicesAndHoldersAllowedStatus: 'ONE_USER_ALL_DEVICES' };
+  var resp = UrlFetchApp.fetch(
+    'https://walletobjects.googleapis.com/walletobjects/v1/genericClass/' + cfg.classId,
+    { method: 'patch', headers: { Authorization: 'Bearer ' + token },
+      contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true }
+  );
+  Logger.log('patchIceWalletClassSharing → %s\n%s', resp.getResponseCode(), resp.getContentText());
 }
 
 // ── Send a test push message to the admin's own pass ──
