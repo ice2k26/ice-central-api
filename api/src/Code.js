@@ -45,9 +45,10 @@ var REGISTRY_TABS = {
 var PROJ = null;
 
 var MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-// Team pitch videos (≤30s, checked client-side). Kept modest so the single
-// base64 POST stays well under the Apps Script request ceiling.
-var MAX_VIDEO_BYTES = 25 * 1024 * 1024;
+// Intro / pitch videos (≤60s, Full-HD 1920×1080, checked client-side). Capped
+// at 32 MB so the single base64 POST (≈43 MB encoded) stays under the Apps
+// Script request ceiling (~50 MB).
+var MAX_VIDEO_BYTES = 32 * 1024 * 1024;
 var CACHE_TTL_SECONDS = 60;
 
 // Workshop Google Workspace: on registration we mint firstname@designthinking.lk
@@ -246,7 +247,7 @@ function roleValue_(roles) {
 // ------------------------------------------------------------------- actions
 
 var AUTH_REQUIRED = {
-  me: 1, register: 1, update_profile: 1, upload_image: 1, check_url: 1, check_email: 1, persona: 1,
+  me: 1, register: 1, update_profile: 1, upload_image: 1, upload_profile_video: 1, check_url: 1, check_email: 1, persona: 1,
   create_team: 1, update_team: 1, delete_team: 1, join_team: 1, leave_team: 1,
   team_link_add: 1, team_link_delete: 1, team_post_add: 1,
   team_project_update: 1, upload_project_video: 1,
@@ -702,7 +703,12 @@ var ACTIONS = {
     if (params.expertise !== undefined) patch.expertise = clean_(params.expertise, 500);
     if (params.gender !== undefined) patch.gender = clean_(params.gender, 30);
     if (params.links !== undefined) patch.links = jsonArr_(params.links, 10, 300);
-    if (params.video !== undefined) patch.video = clean_(params.video, 300);
+    // Intro video is now an uploaded Drive clip (see upload_profile_video); only
+    // a Drive URL (or '' to clear) is stored. Legacy YouTube links get dropped.
+    if (params.video !== undefined) {
+      var pv = clean_(params.video, 300);
+      patch.video = (pv && /^https:\/\/(lh3\.googleusercontent\.com|drive\.(google|usercontent\.google)\.com)\//.test(pv)) ? pv : '';
+    }
     // Roles are pre-assigned (invite) and admin-managed (admin_add_role /
     // admin_remove_role) — update_profile never touches them.
     updateRowById_('users', ctx.user.id, patch);
@@ -725,6 +731,26 @@ var ACTIONS = {
     var bytes = Utilities.base64Decode(b64);
     if (bytes.length > MAX_UPLOAD_BYTES) return { ok: false, error: 'validation', message: 'Image must be under 5 MB.' };
     var name = (clean_(params.filename, 80) || 'upload') + '-' + Date.now();
+    var blob = Utilities.newBlob(bytes, mime, name);
+    var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
+    Drive.Permissions.create({ role: 'reader', type: 'anyone' }, file.id);
+    return { url: 'https://lh3.googleusercontent.com/d/' + file.id, fileId: file.id };
+  },
+
+  /** Upload a member's intro video to the project's Drive uploads folder and
+   *  return its (public) URL. Resolution (1920×1080), length (≤60s) and format
+   *  are validated client-side; here we cap the byte size. Runs during a new
+   *  registration too (no user row yet), so — like upload_image — it just
+   *  stores the file; update_profile persists the URL onto the user row. */
+  upload_profile_video: function (params, ctx) {
+    var data = String(params.data || '');
+    var m = data.match(/^data:([-\w.+/]+);base64,(.*)$/);
+    var mime = m ? m[1] : String(params.mimeType || '');
+    var b64 = m ? m[2] : data;
+    if (!/^video\//.test(mime)) return { ok: false, error: 'validation', message: 'Only video files are allowed.' };
+    var bytes = Utilities.base64Decode(b64);
+    if (bytes.length > MAX_VIDEO_BYTES) return { ok: false, error: 'validation', message: 'Video must be under 32 MB.' };
+    var name = 'intro-' + (clean_(params.filename, 60) || 'video') + '-' + Date.now();
     var blob = Utilities.newBlob(bytes, mime, name);
     var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
     Drive.Permissions.create({ role: 'reader', type: 'anyone' }, file.id);
@@ -820,8 +846,9 @@ var ACTIONS = {
   },
 
   /** Upload a team's pitch video to the project's Drive uploads folder and save
-   *  its (public) URL on the project row. Same team-or-admin guard. Duration is
-   *  validated client-side (≤30s); here we just cap the byte size. */
+   *  its (public) URL on the project row. Same team-or-admin guard. Resolution
+   *  (1920×1080) and length (≤60s) are validated client-side; here we just cap
+   *  the byte size. */
   upload_project_video: function (params, ctx) {
     if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
     var slot = Number(params.slot);
@@ -836,7 +863,7 @@ var ACTIONS = {
     var b64 = m ? m[2] : data;
     if (!/^video\//.test(mime)) return { ok: false, error: 'validation', message: 'Only video files are allowed.' };
     var bytes = Utilities.base64Decode(b64);
-    if (bytes.length > MAX_VIDEO_BYTES) return { ok: false, error: 'validation', message: 'Video must be under 25 MB.' };
+    if (bytes.length > MAX_VIDEO_BYTES) return { ok: false, error: 'validation', message: 'Video must be under 32 MB.' };
     var name = 'project-' + slot + '-' + (clean_(params.filename, 60) || 'video') + '-' + Date.now();
     var blob = Utilities.newBlob(bytes, mime, name);
     var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
