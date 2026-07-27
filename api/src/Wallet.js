@@ -31,6 +31,12 @@
 // rule ships as a NEW class — v1 (shareable, test installs only) is retired.
 var WALLET_CLASS_SUFFIX = 'ice_member_v2';
 
+// The project "business card" — a SHAREABLE, static pass (project + the member
+// who shares it). Separate class so it keeps MULTIPLE_HOLDERS (collectable)
+// while the member card stays locked. No live refresh — fields are frozen when
+// the member mints their card.
+var WALLET_PROJECT_CLASS_SUFFIX = 'ice_project_v1';
+
 // ── Config ───────────────────────────────────────────────────
 function WALLET_config_() {
   var props = PropertiesService.getScriptProperties();
@@ -44,7 +50,9 @@ function WALLET_config_() {
   // a key pasted from a JSON value carries literal "\n" — normalise it.
   var key = String(saKey).replace(/\\n/g, '\n').replace(/\r\n/g, '\n').trim();
   var classId = props.getProperty('WALLET_CLASS_ID') || (issuerId + '.' + WALLET_CLASS_SUFFIX);
-  return { issuerId: issuerId, serviceAccountEmail: saEmail, serviceAccountKey: key, classId: classId };
+  var projectClassId = props.getProperty('WALLET_PROJECT_CLASS_ID') || (issuerId + '.' + WALLET_PROJECT_CLASS_SUFFIX);
+  return { issuerId: issuerId, serviceAccountEmail: saEmail, serviceAccountKey: key,
+           classId: classId, projectClassId: projectClassId };
 }
 
 // ── base64url helpers (WALLET_-prefixed to avoid collisions) ──
@@ -343,6 +351,67 @@ function walletBuildSaveUrl_(user) {
   return 'https://pay.google.com/gp/v/save/' + walletSignSaveJwt_(obj, cfg);
 }
 
+// ── Project "business card" (shareable, static) ──────────────
+// Fields for a member's project card: their team's project + their own name.
+// Returns null when the member isn't on a team / the team has no project row,
+// so callers can refuse to mint a card.
+function projectCardFields_(user) {
+  var teams = readTable_('teams').slice().sort(function (a, b) {
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  var slot = -1, team = null;
+  for (var i = 0; i < teams.length; i++) {
+    if (parseArr_(teams[i].members).indexOf(user.id) !== -1) { team = teams[i]; slot = i; break; }
+  }
+  if (slot === -1) return null;
+  var proj = null;
+  readTeamProjects_().forEach(function (p) { if (p.slot === slot) proj = p; });
+  if (!proj || !(proj.title || '').trim()) return null;
+  return {
+    projectName: proj.title || 'Project',
+    description: proj.description || '',
+    website: /^https?:\/\//i.test(proj.website || '') ? proj.website : (proj.website ? 'https://' + proj.website : ''),
+    memberName: user.name || '',
+    teamName: team.name || ''
+  };
+}
+
+var WALLET_PROJ_OBJ_TAG = '.pcard_';
+function walletProjectObjectId_(cfg, projectId, userId) {
+  return cfg.issuerId + WALLET_PROJ_OBJ_TAG + projectId + '__' + String(userId);
+}
+
+function walletBuildProjectObject_(user, cfg, fields) {
+  var base = walletBaseUrl_();
+  var obj = {
+    id: walletProjectObjectId_(cfg, PROJ.id, user.id),
+    classId: cfg.projectClassId,
+    state: 'ACTIVE',
+    cardTitle:  { defaultValue: { language: 'en-US', value: fields.projectName } },
+    header:     { defaultValue: { language: 'en-US', value: fields.memberName } },
+    subheader:  { defaultValue: { language: 'en-US', value: fields.teamName || (PROJ.name || 'ICE 2026') } },
+    logo: { sourceUri: { uri: base + '/assets/icon-512.png' } },
+    hexBackgroundColor: '#111827',
+    textModulesData: [{ id: 'about', header: 'ABOUT', body: fields.description || '—' }]
+  };
+  // link button + QR only when the project has a real site
+  if (fields.website) {
+    obj.barcode = { type: 'QR_CODE', value: fields.website };
+    obj.linksModuleData = { uris: [{ uri: fields.website, description: 'Open project', id: 'site' }] };
+  }
+  return obj;
+}
+
+// Returns the Add-to-Google-Wallet URL for a member's project business card,
+// or null when the member has no project yet.
+function walletBuildProjectSaveUrl_(user) {
+  var cfg = WALLET_config_();
+  var fields = projectCardFields_(user);
+  if (!fields) return null;
+  var obj = walletBuildProjectObject_(user, cfg, fields);
+  return 'https://pay.google.com/gp/v/save/' + walletSignSaveJwt_(obj, cfg);
+}
+
 // ── Refresh trigger: keep every installed pass live ──
 // Lists all objects under the ICE class straight from Google (they are the
 // source of truth — no local tracking), recomputes each member's live fields,
@@ -517,6 +586,57 @@ function patchIceWalletClassSharing() {
       contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true }
   );
   Logger.log('patchIceWalletClassSharing → %s\n%s', resp.getResponseCode(), resp.getContentText());
+}
+
+// ── One-off: create the SHAREABLE project business-card class ──
+// MULTIPLE_HOLDERS so a card can be collected by anyone it's shared with.
+// Run once; sets WALLET_PROJECT_CLASS_ID. 409 (already exists) is treated as OK.
+function createIceProjectClass() {
+  var cfg = WALLET_config_();
+  var classId = cfg.issuerId + '.' + WALLET_PROJECT_CLASS_SUFFIX;
+  var token = WALLET_accessToken_();
+  var body = {
+    id: classId,
+    enableSmartTap: false,
+    multipleDevicesAndHoldersAllowedStatus: 'MULTIPLE_HOLDERS'
+  };
+  var resp = UrlFetchApp.fetch(
+    'https://walletobjects.googleapis.com/walletobjects/v1/genericClass',
+    { method: 'post', headers: { Authorization: 'Bearer ' + token },
+      contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true }
+  );
+  var code = resp.getResponseCode();
+  Logger.log('createIceProjectClass → %s\n%s', code, resp.getContentText());
+  if (code === 200 || code === 409) {
+    PropertiesService.getScriptProperties().setProperty('WALLET_PROJECT_CLASS_ID', classId);
+    Logger.log('WALLET_PROJECT_CLASS_ID set to %s%s', classId, code === 409 ? ' (existed — OK)' : ' (created)');
+    return classId;
+  }
+  throw new Error('Project class insert failed (' + code + '): ' + resp.getContentText());
+}
+
+// ── One-off: paint the project card FACE (the ABOUT description row) ──
+// cardTitle (project), header (member), subheader (team), logo, link button and
+// QR render by default; the text module needs a template row to show. Run once
+// after createIceProjectClass().
+function patchIceProjectClassTemplate() {
+  var cfg = WALLET_config_();
+  var token = WALLET_accessToken_();
+  var body = {
+    classTemplateInfo: {
+      cardTemplateOverride: {
+        cardRowTemplateInfos: [
+          { oneItem: { item: { firstValue: { fields: [{ fieldPath: "object.textModulesData['about']" }] } } } }
+        ]
+      }
+    }
+  };
+  var resp = UrlFetchApp.fetch(
+    'https://walletobjects.googleapis.com/walletobjects/v1/genericClass/' + cfg.projectClassId,
+    { method: 'patch', headers: { Authorization: 'Bearer ' + token },
+      contentType: 'application/json', payload: JSON.stringify(body), muteHttpExceptions: true }
+  );
+  Logger.log('patchIceProjectClassTemplate → %s\n%s', resp.getResponseCode(), resp.getContentText());
 }
 
 // ── Send a test push message to the admin's own pass ──

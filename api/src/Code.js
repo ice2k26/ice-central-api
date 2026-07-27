@@ -256,7 +256,7 @@ var AUTH_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
-  wallet_link: 1,
+  wallet_link: 1, project_wallet_link: 1,
 };
 
 var ADMIN_REQUIRED = {
@@ -501,6 +501,63 @@ var ACTIONS = {
     if (!fnUrl) return { ok: false, error: 'unconfigured', message: 'Apple Wallet is not configured yet.' };
     var token = walletSignAppleToken_({ uid: user.id, pid: PROJ.id, exp: Date.now() + 30 * 60 * 1000 });
     return { url: fnUrl + (fnUrl.indexOf('?') === -1 ? '?' : '&') + 'at=' + encodeURIComponent(token) };
+  },
+
+  /** Mint a shareable link to the signed-in member's PROJECT business card.
+   *  Longer-lived than the member link (30 days) — it's meant to be handed out
+   *  / printed. Refuses when the member has no project yet. */
+  project_wallet_link: function (params, ctx) {
+    if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
+    if (!projectCardFields_(ctx.user)) return { ok: false, error: 'noproject', message: 'Join a team with a project first.' };
+    var wt = walletSignToken_({ uid: ctx.user.id, pid: PROJ.id, typ: 'pcard', exp: Date.now() + 30 * 24 * 3600 * 1000 });
+    var base = walletBaseUrl_();
+    return { url: base + '/#/pcard?wt=' + encodeURIComponent(wt), token: wt, ttl: 30 * 24 * 3600 };
+  },
+
+  /** Google save URL for a member's project business card. Auth via `wt` (the
+   *  shared link) or the signed-in user, mirroring wallet_pass. */
+  project_pass: function (params, ctx) {
+    var user = null;
+    if (params.wt) {
+      var claims = walletVerifyToken_(String(params.wt));
+      if (!claims || claims.typ !== 'pcard') return { ok: false, error: 'auth', message: 'Card link expired or invalid.' };
+      user = rowById_('users', claims.uid);
+    } else if (ctx.user) {
+      user = ctx.user;
+    }
+    if (!user) return { ok: false, error: 'auth', message: 'Sign in or scan a shared project card.' };
+    try {
+      var url = walletBuildProjectSaveUrl_(user);
+      if (!url) return { ok: false, error: 'noproject', message: 'This member has no project card yet.' };
+      return { url: url, google: url };
+    } catch (err) {
+      return { ok: false, error: 'server', message: 'Project pass failed: ' + (err && err.message || err) };
+    }
+  },
+
+  /** Apple static .pkpass link for a member's project business card. The card
+   *  fields are baked into the signed token (static — no live service). */
+  apple_project_pass: function (params, ctx) {
+    var user = null;
+    if (params.wt) {
+      var claims = walletVerifyToken_(String(params.wt));
+      if (!claims || claims.typ !== 'pcard') return { ok: false, error: 'auth', message: 'Card link expired or invalid.' };
+      user = rowById_('users', claims.uid);
+    } else if (ctx.user) {
+      user = ctx.user;
+    }
+    if (!user) return { ok: false, error: 'auth', message: 'Sign in or scan a shared project card.' };
+    var fields = projectCardFields_(user);
+    if (!fields) return { ok: false, error: 'noproject', message: 'This member has no project card yet.' };
+    var fnUrl = getConfig_('APPLE_PASS_FN_URL', '');
+    if (!fnUrl) return { ok: false, error: 'unconfigured', message: 'Apple Wallet is not configured yet.' };
+    var token = walletSignAppleToken_({
+      uid: user.id, pid: PROJ.id, typ: 'pcard',
+      pn: fields.projectName, pd: fields.description, pw: fields.website,
+      mn: fields.memberName, tn: fields.teamName,
+      exp: Date.now() + 30 * 24 * 3600 * 1000
+    });
+    return { url: fnUrl + (fnUrl.indexOf('?') === -1 ? '?' : '&') + 'pat=' + encodeURIComponent(token) };
   },
 
   /** Server-to-server (Apple function only): current live fields for a serial.
@@ -1132,6 +1189,21 @@ var ACTIONS = {
     var email = String(user.email || '').toLowerCase();
     deleteRowsWhere_('invites', function (r) { return String(r.email || '').toLowerCase() === email; });
     console.log('[delete] invite/allowlist entry removed (if any)');
+
+    // 6. Directory: KEEP the email <-> workEmail pool (so a re-invite reuses the
+    //    same @designthinking.lk account) but WIPE the cached profile snapshot.
+    //    bootstrap.prefill.profile reads this — leaving it would repopulate the
+    //    register card with the deleted person's old details on re-invite. A
+    //    re-registration should start blank, showing only the pre-created work
+    //    email. upsertDirectory_ merges, so workEmail/name are preserved.
+    try {
+      if (findDirectory_(email)) {
+        upsertDirectory_(email, { profile: '' });
+        console.log('[delete] directory profile snapshot cleared (email/workEmail pool kept)');
+      }
+    } catch (e) {
+      console.error('[delete] directory profile clear FAILED — %s', (e && e.message) || e);
+    }
 
     console.log('[delete] DONE user=%s in %sms — directory pool + @designthinking.lk account kept', uid, (new Date().getTime() - t0));
     return {};

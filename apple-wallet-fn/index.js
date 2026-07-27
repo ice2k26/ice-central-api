@@ -202,6 +202,55 @@ async function buildPass(req, serial, fields) {
   return pass;
 }
 
+// Build the SHAREABLE project "business card" — a STATIC pass (no webServiceURL,
+// no auth token, no APNs). All fields are baked into the signed token by the
+// api (apple_project_pass), so nothing is fetched here. Uses its own model dir
+// (model.project.pass) whose pass.json omits sharingProhibited → shareable.
+async function buildProjectPass(claims) {
+  const teamId = process.env.APPLE_TEAM_ID;
+  if (!teamId) throw new Error('APPLE_TEAM_ID missing');
+  const certs = loadCerts();
+  const serial = 'pcard_' + (claims.pid || 'ice') + '__' + (claims.uid || 'x');
+  const website = String(claims.pw || '');
+
+  const pass = await PKPass.from({
+    model: path.join(__dirname, 'model.project.pass'),
+    certificates: {
+      wwdr: certs.wwdr,
+      signerCert: certs.signerCert,
+      signerKey: certs.signerKey,
+      signerKeyPassphrase: (process.env.ICE_PASS_P12_PASSWORD || '').trim(),
+    },
+  }, {
+    passTypeIdentifier: PASS_TYPE_IDENTIFIER,
+    teamIdentifier: teamId,
+    organizationName: ORG_NAME,
+    description: 'ICE project card',
+    serialNumber: serial,
+    backgroundColor: 'rgb(17, 24, 39)',    // #111827 — matches the Google card
+    foregroundColor: FOREGROUND_COLOR,
+    labelColor: 'rgb(190, 197, 210)',
+  });
+
+  pass.type = 'generic';
+  pass.primaryFields.push({ key: 'project', value: claims.pn || 'Project' });
+  pass.secondaryFields.push(
+    { key: 'member', label: 'SHARED BY', value: claims.mn || '' },
+    { key: 'team',   label: 'TEAM',      value: claims.tn || '' },
+  );
+  pass.auxiliaryFields.push({ key: 'about', label: 'ABOUT', value: claims.pd || '—' });
+  if (website) {
+    // a URL field renders tappable on iOS; the QR opens the same site
+    pass.backFields.push({ key: 'site', label: 'Project site', value: website });
+  }
+  pass.setBarcodes({
+    format: 'PKBarcodeFormatQR',
+    message: website || 'https://ice2026.designthinking.lk',
+    messageEncoding: 'iso-8859-1',
+  });
+  return pass;
+}
+
 // ── APNs (mTLS with the pass signing cert; empty payload) ──
 function sendApns(pushTokens) {
   if (!pushTokens.length) return Promise.resolve({ sent: 0, gone: [] });
@@ -269,6 +318,17 @@ functions.http('iceApplePass', async (req, res) => {
       await db.collection(STATE).doc(serial).set({ hash: hash, lastUpdated: Date.now() }, { merge: true });
       res.set('Content-Type', 'application/vnd.apple.pkpass');
       res.set('Content-Disposition', 'attachment; filename="ice_' + serial + '.pkpass"');
+      return res.status(200).send(pass.getAsBuffer());
+    }
+
+    // 1b) Issue a STATIC project business card: GET /?pat=<token>
+    //     Fields are baked into the token; nothing is registered or refreshed.
+    if (req.method === 'GET' && req.query.pat) {
+      const claims = verifyPassToken(req.query.pat);
+      if (!claims || claims.typ !== 'pcard') return res.status(403).send('forbidden: invalid token');
+      const pass = await buildProjectPass(claims);
+      res.set('Content-Type', 'application/vnd.apple.pkpass');
+      res.set('Content-Disposition', 'attachment; filename="ice_project_' + (claims.uid || 'card') + '.pkpass"');
       return res.status(200).send(pass.getAsBuffer());
     }
 
