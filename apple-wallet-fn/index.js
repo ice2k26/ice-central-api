@@ -175,19 +175,22 @@ async function buildPass(req, serial, fields) {
   });
 
   pass.type = 'generic';
-  // Layout mirrors the Google/Android card so the two platforms match:
-  //   name (role label)  ·  TEAM | TEAM SCORE  ·  NOW | UP NEXT | LATEST.
-  // No header field — the title ("ICE 2026" logoText) sits alone up top.
+  // Apple's front has 4 bands top→bottom: header, primary, secondary, auxiliary
+  // (nothing renders below auxiliary). To give NOW/UP NEXT and LATEST room for
+  // longer text, TEAM|TEAM SCORE ride the top header strip, freeing the two
+  // lower bands: NOW|UP NEXT share one row and LATEST gets a full-width row.
   // changeMessage makes iOS show a notification with the new value when the
   // field changes on a live update ("%@" = the new value).
+  pass.headerFields.push(
+    { key: 'team',  label: 'TEAM',  value: fields.team || 'Unassigned' },
+    { key: 'score', label: 'SCORE', value: (fields.score || 0) + ' pts', changeMessage: 'Team score: %@' },
+  );
   pass.primaryFields.push({ key: 'name', label: (fields.role || 'Member'), value: fields.name || '' });
   pass.secondaryFields.push(
-    { key: 'team',  label: 'TEAM',       value: fields.team || 'Unassigned' },
-    { key: 'score', label: 'TEAM SCORE', value: (fields.score || 0) + ' pts', changeMessage: 'Team score: %@' },
-  );
-  pass.auxiliaryFields.push(
     { key: 'now',  label: 'NOW',     value: fields.now || '—', changeMessage: 'Now: %@' },
     { key: 'next', label: 'UP NEXT', value: fields.next || '—' },
+  );
+  pass.auxiliaryFields.push(
     { key: 'note', label: 'LATEST',  value: fields.announcement || '—', changeMessage: '%@' },
   );
   pass.backFields.push(
