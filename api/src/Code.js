@@ -551,10 +551,10 @@ var ACTIONS = {
     if (!fields) return { ok: false, error: 'noproject', message: 'This member has no project card yet.' };
     var fnUrl = getConfig_('APPLE_PASS_FN_URL', '');
     if (!fnUrl) return { ok: false, error: 'unconfigured', message: 'Apple Wallet is not configured yet.' };
+    // fields are fetched live by the function (project_fields) — the token only
+    // needs to authorise uid/pid; no card data is baked in.
     var token = walletSignAppleToken_({
       uid: user.id, pid: PROJ.id, typ: 'pcard',
-      pn: fields.projectName, pd: fields.description, pw: fields.website,
-      mn: fields.memberName, tn: fields.teamName,
       exp: Date.now() + 30 * 24 * 3600 * 1000
     });
     return { url: fnUrl + (fnUrl.indexOf('?') === -1 ? '?' : '&') + 'pat=' + encodeURIComponent(token) };
@@ -574,6 +574,26 @@ var ACTIONS = {
     if (!user) return { ok: false, error: 'notfound', message: 'no such member' };
     var fields = walletComputeFields_(user);
     return { fields: fields, hash: walletFieldsHash_(fields) };
+  },
+
+  /** Server-to-server (Apple function only): current live fields for a PROJECT
+   *  card serial `pcard_<pid>__<uid>`. Lets the static card go live — the Apple
+   *  refresh reads this instead of the fields baked at share time. */
+  project_fields: function (params, ctx) {
+    var serial = String(params.serial || '');
+    if (!walletVerifyAppleSig_(serial, params.ts, params.sig)) {
+      return { ok: false, error: 'forbidden', message: 'bad signature' };
+    }
+    if (serial.indexOf('pcard_') !== 0) return { ok: false, error: 'validation', message: 'bad serial' };
+    var core = serial.substring('pcard_'.length);
+    var sep = core.indexOf('__');
+    if (sep === -1) return { ok: false, error: 'validation', message: 'bad serial' };
+    var uid = core.substring(sep + 2);
+    var user = rowById_('users', uid);
+    if (!user) return { ok: false, error: 'notfound', message: 'no such member' };
+    var fields = projectCardFields_(user);
+    if (!fields) return { ok: false, error: 'noproject', message: 'no project card' };
+    return { fields: fields, hash: walletProjectFieldsHash_(fields) };
   },
 
   /** Short Claude-written description of a skill, for the Skills map's side

@@ -380,6 +380,20 @@ var WALLET_PROJ_OBJ_TAG = '.pcard_';
 function walletProjectObjectId_(cfg, projectId, userId) {
   return cfg.issuerId + WALLET_PROJ_OBJ_TAG + projectId + '__' + String(userId);
 }
+function walletParseProjectObjectId_(cfg, fullId) {
+  var prefix = cfg.issuerId + WALLET_PROJ_OBJ_TAG;
+  if (String(fullId).indexOf(prefix) !== 0) return null;
+  var rest = String(fullId).substring(prefix.length);
+  var sep = rest.indexOf('__');
+  if (sep === -1) return null;
+  return { pid: rest.substring(0, sep), uid: rest.substring(sep + 2) };
+}
+// Stable hash of the project-card fields — drives "did anything change?" both in
+// the Google refresh and the Apple field-fetch (project_fields).
+function walletProjectFieldsHash_(fields) {
+  var s = JSON.stringify([fields.projectName, fields.description, fields.website, fields.memberName, fields.teamName]);
+  return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, s)).replace(/=+$/, '');
+}
 
 function walletBuildProjectObject_(user, cfg, fields) {
   var base = walletBaseUrl_();
@@ -464,8 +478,54 @@ function walletRefreshTick() {
       Logger.log('refresh %s failed: %s', obj.id, err && err.stack || err);
     }
   }
-  Logger.log('walletRefreshTick: %s patched, %s pushed, %s unchanged (of %s)', patched, pushed, skipped, objects.length);
-  return { patched: patched, pushed: pushed, total: objects.length };
+  // Project business cards: re-sync name / description / link / member from the
+  // live project + team data. Shared holders all hold the same object, so one
+  // PATCH updates everyone's copy. No push message — a silent field update.
+  var pobjects = walletListAllObjects_(cfg, token, cfg.projectClassId);
+  var pPatched = 0;
+  for (var pi = 0; pi < pobjects.length; pi++) {
+    var pobj = pobjects[pi];
+    var pparsed = walletParseProjectObjectId_(cfg, pobj.id);
+    if (!pparsed) continue;
+    try {
+      PROJ = getProject_(pparsed.pid);
+      if (!PROJ) continue;
+      var puser = rowById_('users', pparsed.uid);
+      if (!puser) continue;
+      var pf = projectCardFields_(puser);
+      if (!pf) continue; // member left the team / project cleared — leave as-is
+      var fresh = walletBuildProjectObject_(puser, cfg, pf);
+      var curTitle = (pobj.cardTitle && pobj.cardTitle.defaultValue && pobj.cardTitle.defaultValue.value) || '';
+      var curHead  = (pobj.header && pobj.header.defaultValue && pobj.header.defaultValue.value) || '';
+      var curSub   = (pobj.subheader && pobj.subheader.defaultValue && pobj.subheader.defaultValue.value) || '';
+      var curAbout = walletModBody_(pobj.textModulesData, 'about');
+      var curLink  = (pobj.linksModuleData && pobj.linksModuleData.uris && pobj.linksModuleData.uris[0] && pobj.linksModuleData.uris[0].uri) || '';
+      if (curTitle === fresh.cardTitle.defaultValue.value && curHead === fresh.header.defaultValue.value &&
+          curSub === fresh.subheader.defaultValue.value && curAbout === fresh.textModulesData[0].body &&
+          curLink === ((fresh.linksModuleData && fresh.linksModuleData.uris[0] && fresh.linksModuleData.uris[0].uri) || '')) {
+        continue;
+      }
+      var ppatch = {
+        cardTitle: fresh.cardTitle, header: fresh.header, subheader: fresh.subheader,
+        textModulesData: fresh.textModulesData
+      };
+      if (fresh.barcode) ppatch.barcode = fresh.barcode;
+      if (fresh.linksModuleData) ppatch.linksModuleData = fresh.linksModuleData;
+      var presp = UrlFetchApp.fetch(
+        'https://walletobjects.googleapis.com/walletobjects/v1/genericObject/' + pobj.id,
+        { method: 'patch', headers: { Authorization: 'Bearer ' + token },
+          contentType: 'application/json', payload: JSON.stringify(ppatch), muteHttpExceptions: true }
+      );
+      if (presp.getResponseCode() === 200) pPatched++;
+      else Logger.log('PATCH project %s → %s %s', pobj.id, presp.getResponseCode(), presp.getContentText().slice(0, 150));
+    } catch (perr) {
+      Logger.log('project refresh %s failed: %s', pobj.id, perr && perr.stack || perr);
+    }
+  }
+
+  Logger.log('walletRefreshTick: %s patched, %s pushed, %s unchanged (of %s); %s project cards patched (of %s)',
+    patched, pushed, skipped, objects.length, pPatched, pobjects.length);
+  return { patched: patched, pushed: pushed, total: objects.length, projectPatched: pPatched };
 }
 
 function walletModBody_(mods, id) {
@@ -473,11 +533,12 @@ function walletModBody_(mods, id) {
   return '';
 }
 
-function walletListAllObjects_(cfg, token) {
+function walletListAllObjects_(cfg, token, classId) {
+  classId = classId || cfg.classId;
   var out = [], pageToken = '';
   do {
     var url = 'https://walletobjects.googleapis.com/walletobjects/v1/genericObject?classId=' +
-      encodeURIComponent(cfg.classId) + '&maxResults=100' + (pageToken ? '&token=' + encodeURIComponent(pageToken) : '');
+      encodeURIComponent(classId) + '&maxResults=100' + (pageToken ? '&token=' + encodeURIComponent(pageToken) : '');
     var resp = UrlFetchApp.fetch(url, { method: 'get', headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
     if (resp.getResponseCode() !== 200) { Logger.log('list objects → %s %s', resp.getResponseCode(), resp.getContentText().slice(0, 200)); break; }
     var body = JSON.parse(resp.getContentText());

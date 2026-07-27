@@ -124,19 +124,26 @@ function parseSerial(serial) {
   return { pid: serial.slice(0, i), uid: serial.slice(i + 2) };
 }
 
-// ── live fields from the ICE API ──
+const isProjectSerial = (serial) => String(serial).startsWith('pcard_');
+
+// ── live fields from the ICE API (member card OR project card) ──
 async function fetchFields(serial) {
-  const parsed = parseSerial(serial);
-  if (!parsed) throw new Error('bad serial');
+  const proj = isProjectSerial(serial);
+  // project serial is pcard_<pid>__<uid>; member serial is <pid>__<uid>
+  const core = proj ? String(serial).slice('pcard_'.length) : String(serial);
+  const i = core.indexOf('__');
+  if (i === -1) throw new Error('bad serial');
+  const pid = core.slice(0, i);
+  const action = proj ? 'project_fields' : 'wallet_fields';
   const ts = Date.now();
   const sig = crypto.createHmac('sha256', hmacSecret()).update(serial + '|' + ts).digest('hex');
-  const body = JSON.stringify({ action: 'wallet_fields', project: parsed.pid, serial, ts, sig });
+  const body = JSON.stringify({ action, project: pid, serial, ts, sig });
   const resp = await fetch(process.env.ICE_API_URL, {
     method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body,
   });
   const data = await resp.json();
   if (!data || data.ok === false || !data.fields) {
-    throw new Error('wallet_fields failed: ' + (data && data.message || resp.status));
+    throw new Error(action + ' failed: ' + (data && data.message || resp.status));
   }
   return { fields: data.fields, hash: data.hash || '' };
 }
@@ -202,16 +209,16 @@ async function buildPass(req, serial, fields) {
   return pass;
 }
 
-// Build the SHAREABLE project "business card" — a STATIC pass (no webServiceURL,
-// no auth token, no APNs). All fields are baked into the signed token by the
-// api (apple_project_pass), so nothing is fetched here. Uses its own model dir
-// (model.project.pass) whose pass.json omits sharingProhibited → shareable.
-async function buildProjectPass(claims) {
+// Build the SHAREABLE project "business card" — a LIVE pass. It carries a
+// webServiceURL + authenticationToken so every holder's device registers and
+// gets pushed when the project name / description / link changes (fields come
+// from project_fields, not baked in). Own model dir (model.project.pass) whose
+// pass.json omits sharingProhibited → shareable/collectable.
+async function buildProjectPass(req, serial, fields) {
   const teamId = process.env.APPLE_TEAM_ID;
   if (!teamId) throw new Error('APPLE_TEAM_ID missing');
   const certs = loadCerts();
-  const serial = 'pcard_' + (claims.pid || 'ice') + '__' + (claims.uid || 'x');
-  const website = String(claims.pw || '');
+  const website = String(fields.website || '');
 
   const pass = await PKPass.from({
     model: path.join(__dirname, 'model.project.pass'),
@@ -230,15 +237,17 @@ async function buildProjectPass(claims) {
     backgroundColor: 'rgb(17, 24, 39)',    // #111827 — matches the Google card
     foregroundColor: FOREGROUND_COLOR,
     labelColor: 'rgb(190, 197, 210)',
+    webServiceURL: webServiceUrl(req),
+    authenticationToken: passAuthToken(serial),
   });
 
   pass.type = 'generic';
-  pass.primaryFields.push({ key: 'project', value: claims.pn || 'Project' });
+  pass.primaryFields.push({ key: 'project', value: fields.projectName || 'Project', changeMessage: 'Project: %@' });
   pass.secondaryFields.push(
-    { key: 'member', label: 'SHARED BY', value: claims.mn || '' },
-    { key: 'team',   label: 'TEAM',      value: claims.tn || '' },
+    { key: 'member', label: 'SHARED BY', value: fields.memberName || '' },
+    { key: 'team',   label: 'TEAM',      value: fields.teamName || '' },
   );
-  pass.auxiliaryFields.push({ key: 'about', label: 'ABOUT', value: claims.pd || '—' });
+  pass.auxiliaryFields.push({ key: 'about', label: 'ABOUT', value: fields.description || '—', changeMessage: '%@' });
   if (website) {
     // a URL field renders tappable on iOS; the QR opens the same site
     pass.backFields.push({ key: 'site', label: 'Project site', value: website });
@@ -321,12 +330,15 @@ functions.http('iceApplePass', async (req, res) => {
       return res.status(200).send(pass.getAsBuffer());
     }
 
-    // 1b) Issue a STATIC project business card: GET /?pat=<token>
-    //     Fields are baked into the token; nothing is registered or refreshed.
+    // 1b) Issue a LIVE project business card: GET /?pat=<token>
+    //     Fields are fetched live; the device then registers for updates.
     if (req.method === 'GET' && req.query.pat) {
       const claims = verifyPassToken(req.query.pat);
       if (!claims || claims.typ !== 'pcard') return res.status(403).send('forbidden: invalid token');
-      const pass = await buildProjectPass(claims);
+      const serial = 'pcard_' + claims.pid + '__' + claims.uid;
+      const { fields, hash } = await fetchFields(serial);
+      const pass = await buildProjectPass(req, serial, fields);
+      await db.collection(STATE).doc(serial).set({ hash: hash, lastUpdated: Date.now() }, { merge: true });
       res.set('Content-Type', 'application/vnd.apple.pkpass');
       res.set('Content-Disposition', 'attachment; filename="ice_project_' + (claims.uid || 'card') + '.pkpass"');
       return res.status(200).send(pass.getAsBuffer());
@@ -381,7 +393,9 @@ functions.http('iceApplePass', async (req, res) => {
       const serial = decodeURIComponent(m[2]);
       if (!checkPassAuth(req, serial)) return res.status(401).send('unauthorized');
       const { fields } = await fetchFields(serial);
-      const pass = await buildPass(req, serial, fields);
+      const pass = isProjectSerial(serial)
+        ? await buildProjectPass(req, serial, fields)
+        : await buildPass(req, serial, fields);
       res.set('Content-Type', 'application/vnd.apple.pkpass');
       res.set('Last-Modified', new Date().toUTCString());
       return res.status(200).send(pass.getAsBuffer());
