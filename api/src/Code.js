@@ -1152,7 +1152,13 @@ var ACTIONS = {
       role: roleValue_(roles.filter(function (r) { return r !== role; })),
       updatedAt: new Date().toISOString(),
     });
-    return { roles: rolesOf_(rowById_('users', user.id)) };
+    // Losing the last community role → drop out of any team (admin-only people
+    // don't sit in teams and aren't in the assignable pool). Re-adding a
+    // participant/mentor role later lets them be assigned again.
+    var updated = rowById_('users', user.id);
+    var unassigned = 0;
+    if (!isCommunityMember_(updated)) unassigned = removeUserFromTeams_(user.id);
+    return { roles: rolesOf_(updated), unassignedFromTeams: unassigned };
   },
 
   // Per-project purge: removes the person and everything they own IN THIS
@@ -2287,6 +2293,31 @@ function teamForSlot_(slot) {
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
   return teams[slot];
+}
+
+// Community roles let someone sit in a team; admin-only people can't. Used to
+// decide auto-unassignment when a role is removed.
+function isCommunityMember_(user) {
+  var roles = rolesOf_(user);
+  return roles.indexOf('participant') !== -1 || roles.indexOf('mentor') !== -1;
+}
+
+// Pull a user out of every team they're on (they lost their last community
+// role). Returns how many teams were touched.
+function removeUserFromTeams_(uid) {
+  var now = new Date().toISOString();
+  var removed = 0;
+  readTable_('teams', true).forEach(function (t) {
+    var members = parseArr_(t.members);
+    if (members.indexOf(uid) !== -1) {
+      updateRowById_('teams', t.id, {
+        members: JSON.stringify(members.filter(function (id) { return id !== uid; })),
+        updatedAt: now,
+      });
+      removed++;
+    }
+  });
+  return removed;
 }
 
 // ----------------------------------------------------------- persona (LLM)
