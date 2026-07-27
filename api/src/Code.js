@@ -377,7 +377,7 @@ var ACTIONS = {
     var invite = null;
     if (ctx.email && !ctx.user) {
       var invRow = findInviteByEmail_(ctx.email);
-      if (invRow) invite = { role: invRow.role === 'mentor' ? 'mentor' : 'participant' };
+      if (invRow) invite = { role: invRow.role === 'mentor' ? 'mentor' : invRow.role === 'admin' ? 'admin' : 'participant' };
     }
     return {
       registrationOpen: PROJ.registrationOpen,
@@ -667,9 +667,12 @@ var ACTIONS = {
       gender: clean_(params.gender, 30),
       links: jsonArr_(params.links, 10, 300),
       video: clean_(params.video, 300),
-      // Pre-assigned by the invite: participant (member/student) or mentor
-      // (facilitator). Global admins always register as admin.
-      role: isAdminEmail_(ctx.email) ? 'admin' : (invite && invite.role === 'mentor' ? 'mentor' : 'participant'),
+      // Pre-assigned by the invite: participant (member/student), mentor
+      // (facilitator) or admin (organizer). Global admins always register as admin.
+      role: isAdminEmail_(ctx.email) ? 'admin'
+          : (invite && invite.role === 'mentor') ? 'mentor'
+          : (invite && invite.role === 'admin') ? 'admin'
+          : 'participant',
       createdAt: now,
       updatedAt: now,
       workEmail: workEmail,
@@ -1302,8 +1305,8 @@ var ACTIONS = {
   // emails are skipped and reported.
   admin_invite: function (params, ctx) {
     var role = String(params.role || '').toLowerCase();
-    if (role !== 'participant' && role !== 'mentor') {
-      return { ok: false, error: 'validation', message: 'Invite role must be participant or mentor.' };
+    if (role !== 'participant' && role !== 'mentor' && role !== 'admin') {
+      return { ok: false, error: 'validation', message: 'Invite role must be participant, mentor or admin.' };
     }
     var raw = Array.isArray(params.emails) ? params.emails : parseArr_(params.emails);
     var emails = [];
@@ -2470,7 +2473,7 @@ function sendInviteEmail_(to, role, replyTo) {
     var url = PROJ.siteUrl
       ? (/^https?:\/\//i.test(PROJ.siteUrl) ? PROJ.siteUrl : 'https://' + PROJ.siteUrl)
       : 'https://ice.designthinking.lk/?project=' + PROJ.id;
-    var roleLabel = role === 'mentor' ? 'a mentor' : 'a participant';
+    var roleLabel = role === 'mentor' ? 'a mentor' : role === 'admin' ? 'an organizer' : 'a participant';
     var html =
       '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0E0F11">' +
       '<h2 style="color:#6100FF;margin:0 0 6px">You&#39;re invited to ' + ev + '</h2>' +

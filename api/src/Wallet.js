@@ -231,10 +231,13 @@ function walletFieldsHash_(fields) {
 }
 
 // ── Live field computation (assumes PROJ is set) ──
+// Wallet card title. Community roles win: Mentor, then Participant. Only when
+// neither is held (an organiser with no community chip) does it read 'Admin'.
 function walletRoleLabel_(user) {
   var roles = rolesOf_(user);
-  if (roles.indexOf('admin') !== -1) return 'Organizer';
   if (roles.indexOf('mentor') !== -1) return 'Mentor';
+  if (roles.indexOf('participant') !== -1) return 'Participant';
+  if (roles.indexOf('admin') !== -1) return 'Admin';
   return 'Member';
 }
 
