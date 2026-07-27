@@ -15,7 +15,7 @@
  *   WALLET_SA_EMAIL        — ahl-wallet-issuer@...iam.gserviceaccount.com
  *   WALLET_SA_PRIVATE_KEY  — full PEM (BEGIN/END lines)
  * Set automatically by createIceWalletClass_():
- *   WALLET_CLASS_ID        — <issuerId>.ice_member_v1
+ *   WALLET_CLASS_ID        — <issuerId>.ice_member_v2
  *
  * ── One-off setup ──
  *   1. Set the 3 properties above.
@@ -26,7 +26,10 @@
  * underscore — Apps Script hides `_`-suffixed functions from the Run menu.
  */
 
-var WALLET_CLASS_SUFFIX = 'ice_member_v1';
+// v2: created with ONE_USER_ALL_DEVICES (non-shareable). Google forbids
+// tightening sharing on a class that already has saved passes, so the locked
+// rule ships as a NEW class — v1 (shareable, test installs only) is retired.
+var WALLET_CLASS_SUFFIX = 'ice_member_v2';
 
 // ── Config ───────────────────────────────────────────────────
 function WALLET_config_() {
@@ -306,8 +309,6 @@ function walletBuildObject_(user, cfg, fields) {
     id: walletObjectId_(cfg, PROJ.id, user.id),
     classId: cfg.classId,
     state: 'ACTIVE',
-    // personal card — not shareable to other people's wallets (mirrors class)
-    multipleDevicesAndHoldersAllowedStatus: 'ONE_USER_ALL_DEVICES',
     cardTitle: { defaultValue: { language: 'en-US', value: PROJ.name || 'ICE 2026' } },
     header:    { defaultValue: { language: 'en-US', value: fields.name || user.name } },
     subheader: { defaultValue: { language: 'en-US', value: fields.role || 'Member' } },
@@ -500,12 +501,12 @@ function patchIceWalletClassTemplate() {
   Logger.log('patchIceWalletClassTemplate → %s\n%s', resp.getResponseCode(), resp.getContentText());
 }
 
-// ── One-off: lock the EXISTING class so passes can't be shared ──
-// createIceWalletClass() 409s (no-op) once the class exists, so the sharing
-// change to its body never lands on the live class. Run this once to PATCH it:
-// ONE_USER_ALL_DEVICES removes Google Wallet's "share pass" option, so nobody
-// can add another member's card to their own wallet. Applies to every already
-// installed pass within minutes. Idempotent — safe to re-run.
+// ── Lock class sharing (only works BEFORE any pass is saved) ──
+// ONE_USER_ALL_DEVICES removes Google Wallet's "share pass" option. NOTE:
+// Google REJECTS this PATCH (400) once holders have saved the class — it
+// can't retroactively enforce the constraint. That's why v2 ships as a fresh
+// class (WALLET_CLASS_SUFFIX) created locked from the start via
+// createIceWalletClass(). This helper stays for a class with zero saves.
 function patchIceWalletClassSharing() {
   var cfg = WALLET_config_();
   var token = WALLET_accessToken_();
