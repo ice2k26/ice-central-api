@@ -490,7 +490,9 @@ function walletRefreshTick() {
       var freshMods = walletTextModules_(fields);
       var curMods = obj.textModulesData || [];
       var curName = (obj.header && obj.header.defaultValue && obj.header.defaultValue.value) || '';
-      if (JSON.stringify(curMods) === JSON.stringify(freshMods) && curName === fields.name) { skipped++; continue; }
+      var curRole = (obj.subheader && obj.subheader.defaultValue && obj.subheader.defaultValue.value) || '';
+      if (JSON.stringify(curMods) === JSON.stringify(freshMods) && curName === fields.name &&
+          curRole === (fields.role || 'Member')) { skipped++; continue; }
 
       var patch = {
         header:    { defaultValue: { language: 'en-US', value: fields.name || user.name } },
