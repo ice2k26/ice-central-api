@@ -810,6 +810,9 @@ var ACTIONS = {
       patch.websiteOk = web ? (urlReachable_(web) ? '1' : '') : '';
     }
     updateRowById_('team_projects', proj.id, patch);
+    // push the change to any saved project business cards right away (Google
+    // instant; Apple picks it up on its next scheduler tick)
+    try { walletRefreshProjectForTeam_(team); } catch (e) { console.warn('project card refresh failed: ' + (e && e.message || e)); }
     return { teamProjects: readTeamProjects_() };
   },
 

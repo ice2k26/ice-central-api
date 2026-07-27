@@ -426,6 +426,41 @@ function walletBuildProjectSaveUrl_(user) {
   return 'https://pay.google.com/gp/v/save/' + walletSignSaveJwt_(obj, cfg);
 }
 
+// Instantly re-sync the Google project cards of a team's members — called the
+// moment a project is edited, so holders don't wait for the 5-min tick. Apple
+// holders update on the next scheduler push (~5 min; the api can't send APNs).
+// Best-effort: a member who never saved a card just 404s and is skipped.
+function walletRefreshProjectForTeam_(team) {
+  if (!team) return { patched: 0 };
+  var cfg, token;
+  try { cfg = WALLET_config_(); token = WALLET_accessToken_(); }
+  catch (e) { Logger.log('wallet not configured, skip project refresh: ' + e); return { patched: 0 }; }
+  var members = parseArr_(team.members || []);
+  var patched = 0;
+  for (var i = 0; i < members.length; i++) {
+    try {
+      var user = rowById_('users', members[i]);
+      if (!user) continue;
+      var pf = projectCardFields_(user);
+      if (!pf) continue;
+      var fresh = walletBuildProjectObject_(user, cfg, pf);
+      var patch = {
+        cardTitle: fresh.cardTitle, header: fresh.header, subheader: fresh.subheader,
+        textModulesData: fresh.textModulesData
+      };
+      if (fresh.barcode) patch.barcode = fresh.barcode;
+      if (fresh.linksModuleData) patch.linksModuleData = fresh.linksModuleData;
+      var resp = UrlFetchApp.fetch(
+        'https://walletobjects.googleapis.com/walletobjects/v1/genericObject/' + fresh.id,
+        { method: 'patch', headers: { Authorization: 'Bearer ' + token },
+          contentType: 'application/json', payload: JSON.stringify(patch), muteHttpExceptions: true }
+      );
+      if (resp.getResponseCode() === 200) patched++;
+    } catch (e) { Logger.log('project card patch (team) failed: ' + e); }
+  }
+  return { patched: patched };
+}
+
 // ── Refresh trigger: keep every installed pass live ──
 // Lists all objects under the ICE class straight from Google (they are the
 // source of truth — no local tracking), recomputes each member's live fields,
