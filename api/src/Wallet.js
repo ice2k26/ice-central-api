@@ -375,7 +375,8 @@ function projectCardFields_(user) {
     description: proj.description || '',
     website: /^https?:\/\//i.test(proj.website || '') ? proj.website : (proj.website ? 'https://' + proj.website : ''),
     memberName: user.name || '',
-    teamName: team.name || ''
+    teamName: team.name || '',
+    color: proj.color || ''
   };
 }
 
@@ -394,8 +395,18 @@ function walletParseProjectObjectId_(cfg, fullId) {
 // Stable hash of the project-card fields — drives "did anything change?" both in
 // the Google refresh and the Apple field-fetch (project_fields).
 function walletProjectFieldsHash_(fields) {
-  var s = JSON.stringify([fields.projectName, fields.description, fields.website, fields.memberName, fields.teamName]);
+  var s = JSON.stringify([fields.projectName, fields.description, fields.website, fields.memberName, fields.teamName, fields.color]);
   return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, s)).replace(/=+$/, '');
+}
+
+// Map the project's palette choice (pc-1..pc-6) to a solid card background —
+// a darker representative of each gradient so the white pass text stays legible.
+function walletProjectHexColor_(pc) {
+  var m = {
+    'pc-1': '#5324C7', 'pc-2': '#025F70', 'pc-3': '#D63868',
+    'pc-4': '#26398C', 'pc-5': '#B7266F', 'pc-6': '#14544A'
+  };
+  return m[pc] || '#111827';
 }
 
 function walletBuildProjectObject_(user, cfg, fields) {
@@ -408,7 +419,7 @@ function walletBuildProjectObject_(user, cfg, fields) {
     header:     { defaultValue: { language: 'en-US', value: fields.memberName } },
     subheader:  { defaultValue: { language: 'en-US', value: fields.teamName || (PROJ.name || 'ICE 2026') } },
     logo: { sourceUri: { uri: base + '/assets/icon-512.png' } },
-    hexBackgroundColor: '#111827',
+    hexBackgroundColor: walletProjectHexColor_(fields.color),
     textModulesData: [{ id: 'about', header: 'ABOUT', body: fields.description || '—' }]
   };
   // link button + QR only when the project has a real site
@@ -449,7 +460,7 @@ function walletRefreshProjectForTeam_(team) {
       var fresh = walletBuildProjectObject_(user, cfg, pf);
       var patch = {
         cardTitle: fresh.cardTitle, header: fresh.header, subheader: fresh.subheader,
-        textModulesData: fresh.textModulesData
+        textModulesData: fresh.textModulesData, hexBackgroundColor: fresh.hexBackgroundColor
       };
       if (fresh.barcode) patch.barcode = fresh.barcode;
       if (fresh.linksModuleData) patch.linksModuleData = fresh.linksModuleData;
@@ -540,14 +551,16 @@ function walletRefreshTick() {
       var curSub   = (pobj.subheader && pobj.subheader.defaultValue && pobj.subheader.defaultValue.value) || '';
       var curAbout = walletModBody_(pobj.textModulesData, 'about');
       var curLink  = (pobj.linksModuleData && pobj.linksModuleData.uris && pobj.linksModuleData.uris[0] && pobj.linksModuleData.uris[0].uri) || '';
+      var curColor = (pobj.hexBackgroundColor || '').toUpperCase();
       if (curTitle === fresh.cardTitle.defaultValue.value && curHead === fresh.header.defaultValue.value &&
           curSub === fresh.subheader.defaultValue.value && curAbout === fresh.textModulesData[0].body &&
+          curColor === fresh.hexBackgroundColor.toUpperCase() &&
           curLink === ((fresh.linksModuleData && fresh.linksModuleData.uris[0] && fresh.linksModuleData.uris[0].uri) || '')) {
         continue;
       }
       var ppatch = {
         cardTitle: fresh.cardTitle, header: fresh.header, subheader: fresh.subheader,
-        textModulesData: fresh.textModulesData
+        textModulesData: fresh.textModulesData, hexBackgroundColor: fresh.hexBackgroundColor
       };
       if (fresh.barcode) ppatch.barcode = fresh.barcode;
       if (fresh.linksModuleData) ppatch.linksModuleData = fresh.linksModuleData;

@@ -214,6 +214,13 @@ async function buildPass(req, serial, fields) {
 // gets pushed when the project name / description / link changes (fields come
 // from project_fields, not baked in). Own model dir (model.project.pass) whose
 // pass.json omits sharingProhibited → shareable/collectable.
+// Project palette (pc-1..pc-6) → solid pass background, matching the Google card.
+const PROJECT_PC_COLORS = {
+  'pc-1': 'rgb(83,36,199)', 'pc-2': 'rgb(2,95,112)', 'pc-3': 'rgb(214,56,104)',
+  'pc-4': 'rgb(38,57,140)', 'pc-5': 'rgb(183,38,111)', 'pc-6': 'rgb(20,84,74)',
+};
+const projectBgColor = (pc) => PROJECT_PC_COLORS[pc] || 'rgb(17, 24, 39)';
+
 async function buildProjectPass(req, serial, fields) {
   const teamId = process.env.APPLE_TEAM_ID;
   if (!teamId) throw new Error('APPLE_TEAM_ID missing');
@@ -234,7 +241,7 @@ async function buildProjectPass(req, serial, fields) {
     organizationName: ORG_NAME,
     description: 'ICE project card',
     serialNumber: serial,
-    backgroundColor: 'rgb(17, 24, 39)',    // #111827 — matches the Google card
+    backgroundColor: projectBgColor(fields.color), // follows the project's chosen colour
     foregroundColor: FOREGROUND_COLOR,
     labelColor: 'rgb(190, 197, 210)',
     webServiceURL: webServiceUrl(req),
