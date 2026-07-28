@@ -330,6 +330,7 @@ var ACTIONS = {
         name: u.name || 'Member',
         subtitle: parts.join(' · '),
         role: roleLabel,
+        tagline: (PROJ && PROJ.tagline) || '',
         color: '',
         event: eventName,
         square: false,
