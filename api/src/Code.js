@@ -757,7 +757,19 @@ var ACTIONS = {
     var blob = Utilities.newBlob(bytes, mime, name);
     var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
     Drive.Permissions.create({ role: 'reader', type: 'anyone' }, file.id);
-    return { url: 'https://lh3.googleusercontent.com/d/' + file.id, fileId: file.id };
+    var url = 'https://lh3.googleusercontent.com/d/' + file.id;
+    // For an existing member, persist the clip onto their row right away so it
+    // takes effect without a separate profile save (registration has no row yet
+    // — the video rides along in register()). Delete the old clip it replaces.
+    if (ctx.user) {
+      var prevFid = driveFileId_(ctx.user.video);
+      if (prevFid && prevFid !== file.id) { try { Drive.Files.remove(prevFid); } catch (e) { console.warn('replace video: ' + ((e && e.message) || e)); } }
+      updateRowById_('users', ctx.user.id, { video: url, videoName: clean_(params.videoName, 120), updatedAt: new Date().toISOString() });
+      var updated = findUserByEmail_(ctx.email);
+      upsertDirectory_(ctx.email, { name: updated.name, lastProjectId: PROJ.id, profile: JSON.stringify(profileSnapshot_(updated)) });
+      return { url: url, fileId: file.id, user: projectUser_(updated, ctx, true) };
+    }
+    return { url: url, fileId: file.id };
   },
 
   /** Remove a member's intro clip: delete the Drive file (the one passed by the
