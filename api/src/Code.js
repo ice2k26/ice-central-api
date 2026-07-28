@@ -319,14 +319,20 @@ var ACTIONS = {
       if (!u) return { ok: false, error: 'notfound', message: 'No such member.' };
       var roles = String(u.role || '').split(',').map(function (r) { return r.trim(); });
       var roleLabel = roles.indexOf('mentor') !== -1 ? 'Mentor' : roles.indexOf('admin') !== -1 ? 'Organizer' : 'Participant';
-      var parts = [roleLabel + ' at ' + eventName];
+      var parts = [roleLabel]; // event name already shows in the title/kicker
       if (u.affiliation) parts.push(u.affiliation);
       if (u.expertise) parts.push(u.expertise);
       return { card: {
         title: (u.name || 'Member') + ' — ' + eventName,
         description: parts.join(' · '),
-        image: u.image || ogImg,
-        square: !!u.image, // a member photo suits a square summary card
+        image: u.image || ogImg,           // fallback OG image (Worker prefers /img/)
+        photo: u.image || '',              // raw member photo (for the generator)
+        name: u.name || 'Member',
+        subtitle: parts.join(' · '),
+        role: roleLabel,
+        color: '',
+        event: eventName,
+        square: false,
         appUrl: base + '/#/profile/' + u.id
       } };
     }
@@ -338,7 +344,13 @@ var ACTIONS = {
       return { card: {
         title: proj.title + ' — ' + eventName,
         description: proj.description || 'A project at ' + eventName + '.',
-        image: ogImg,
+        image: ogImg,                      // fallback OG image (Worker prefers /img/)
+        photo: '',
+        name: proj.title,
+        subtitle: proj.description || '',
+        role: 'Project',
+        color: proj.color || '',           // pc-1..6 → the generator picks the gradient
+        event: eventName,
         square: false,
         appUrl: base + '/#/projects/' + slot
       } };
