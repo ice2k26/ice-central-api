@@ -765,8 +765,15 @@ var ACTIONS = {
    *  the saved row) and clear the row's video field. Works mid-registration too
    *  (no user row yet): it just deletes the Drive file. */
   remove_profile_video: function (params, ctx) {
+    var urls = [params.url, ctx.user && ctx.user.video];
+    // Clear the row FIRST — the card reverts to the default immediately and we
+    // never leave a row pointing at a file we're about to delete. THEN delete
+    // the blob (best-effort: a failed delete just orphans a harmless file).
+    if (ctx.user) {
+      updateRowById_('users', ctx.user.id, { video: '', videoName: '', updatedAt: new Date().toISOString() });
+    }
     var seen = {};
-    [params.url, ctx.user && ctx.user.video].forEach(function (u) {
+    urls.forEach(function (u) {
       var fid = driveFileId_(u);
       if (fid && !seen[fid]) {
         seen[fid] = 1;
@@ -774,7 +781,6 @@ var ACTIONS = {
       }
     });
     if (ctx.user) {
-      updateRowById_('users', ctx.user.id, { video: '', videoName: '', updatedAt: new Date().toISOString() });
       var updated = findUserByEmail_(ctx.email);
       upsertDirectory_(ctx.email, {
         name: updated.name,
