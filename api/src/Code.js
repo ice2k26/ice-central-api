@@ -306,7 +306,13 @@ var ACTIONS = {
     var base = (PROJ && PROJ.siteUrl && /^https?:\/\//i.test(PROJ.siteUrl)) ? PROJ.siteUrl.replace(/\/+$/, '')
       : ('https://' + (PROJ ? PROJ.id : 'ice2026') + '.designthinking.lk');
     var ogImg = base + '/assets/og-image-v3.jpg';
-    var eventName = (PROJ && PROJ.name) || 'ICE';
+    // "ice2026" → "ICE 2026" (short acronym uppercased, year split off); longer
+    // multi-word names are left as-is.
+    var rawName = (PROJ && PROJ.name) || 'ICE';
+    var nm = String(rawName).match(/^([A-Za-z]+)\s*(\d{2,4})?$/);
+    var eventName = nm
+      ? ((nm[1].length <= 4 ? nm[1].toUpperCase() : (nm[1].charAt(0).toUpperCase() + nm[1].slice(1))) + (nm[2] ? ' ' + nm[2] : ''))
+      : rawName;
     var kind = String(params.kind || '');
     if (kind === 'u') {
       var u = rowById_('users', String(params.id || ''));
