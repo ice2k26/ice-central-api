@@ -62,7 +62,7 @@ var WORKSPACE_OU = '/ICE';
 // here, and the row fixes the role. Rows outlive registration — "invited vs
 // registered" is derived by matching users.email.
 var TABLES = {
-  users: ['id', 'email', 'name', 'image', 'bio', 'skills', 'affiliation', 'expertise', 'gender', 'links', 'video', 'role', 'createdAt', 'updatedAt', 'workEmail'],
+  users: ['id', 'email', 'name', 'image', 'bio', 'skills', 'affiliation', 'expertise', 'gender', 'links', 'video', 'role', 'createdAt', 'updatedAt', 'workEmail', 'videoName'],
   invites: ['id', 'email', 'role', 'invitedBy', 'createdAt', 'lastSentAt', 'sendCount'],
   // 'score' is appended LAST so existing team rows (8 cols) stay column-aligned.
   teams: ['id', 'name', 'description', 'coverImage', 'lookingFor', 'creatorId', 'members', 'createdAt', 'updatedAt', 'score'],
@@ -107,7 +107,7 @@ var DEFAULT_TEAM_PROJECTS = [
 ];
 
 // workEmail is public: it's a workshop chat handle other participants DM.
-var USER_PUBLIC_FIELDS = ['id', 'name', 'image', 'bio', 'skills', 'affiliation', 'expertise', 'links', 'video', 'role', 'createdAt', 'workEmail'];
+var USER_PUBLIC_FIELDS = ['id', 'name', 'image', 'bio', 'skills', 'affiliation', 'expertise', 'links', 'video', 'videoName', 'role', 'createdAt', 'workEmail'];
 
 // Fixed workshop teams for admin assignment ("Team A"…"Team F", rows created
 // in the teams tab on first use). Per team: 5 participants + 2 mentors — an
@@ -668,6 +668,7 @@ var ACTIONS = {
       gender: clean_(params.gender, 30),
       links: jsonArr_(params.links, 10, 300),
       video: clean_(params.video, 300),
+      videoName: clean_(params.videoName, 120),
       // Pre-assigned by the invite: participant (member/student), mentor
       // (facilitator) or admin (organizer). Global admins always register as admin.
       role: isAdminEmail_(ctx.email) ? 'admin'
@@ -708,7 +709,9 @@ var ACTIONS = {
     if (params.video !== undefined) {
       var pv = clean_(params.video, 300);
       patch.video = (pv && /^https:\/\/(lh3\.googleusercontent\.com|drive\.(google|usercontent\.google)\.com)\//.test(pv)) ? pv : '';
+      if (!patch.video) patch.videoName = ''; // video cleared → drop its name
     }
+    if (params.videoName !== undefined) patch.videoName = clean_(params.videoName, 120);
     // Roles are pre-assigned (invite) and admin-managed (admin_add_role /
     // admin_remove_role) — update_profile never touches them.
     updateRowById_('users', ctx.user.id, patch);
@@ -771,7 +774,7 @@ var ACTIONS = {
       }
     });
     if (ctx.user) {
-      updateRowById_('users', ctx.user.id, { video: '', updatedAt: new Date().toISOString() });
+      updateRowById_('users', ctx.user.id, { video: '', videoName: '', updatedAt: new Date().toISOString() });
       var updated = findUserByEmail_(ctx.email);
       upsertDirectory_(ctx.email, {
         name: updated.name,
