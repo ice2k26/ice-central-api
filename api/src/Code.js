@@ -247,7 +247,7 @@ function roleValue_(roles) {
 // ------------------------------------------------------------------- actions
 
 var AUTH_REQUIRED = {
-  me: 1, register: 1, update_profile: 1, upload_image: 1, upload_profile_video: 1, check_url: 1, check_email: 1, persona: 1,
+  me: 1, register: 1, update_profile: 1, upload_image: 1, upload_profile_video: 1, remove_profile_video: 1, check_url: 1, check_email: 1, persona: 1,
   create_team: 1, update_team: 1, delete_team: 1, join_team: 1, leave_team: 1,
   team_link_add: 1, team_link_delete: 1, team_post_add: 1,
   team_project_update: 1, upload_project_video: 1,
@@ -755,6 +755,32 @@ var ACTIONS = {
     var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
     Drive.Permissions.create({ role: 'reader', type: 'anyone' }, file.id);
     return { url: 'https://lh3.googleusercontent.com/d/' + file.id, fileId: file.id };
+  },
+
+  /** Remove a member's intro clip: delete the Drive file (the one passed by the
+   *  client — which may be a just-uploaded, not-yet-saved clip — and the one on
+   *  the saved row) and clear the row's video field. Works mid-registration too
+   *  (no user row yet): it just deletes the Drive file. */
+  remove_profile_video: function (params, ctx) {
+    var seen = {};
+    [params.url, ctx.user && ctx.user.video].forEach(function (u) {
+      var fid = driveFileId_(u);
+      if (fid && !seen[fid]) {
+        seen[fid] = 1;
+        try { Drive.Files.remove(fid); } catch (e) { console.warn('remove video ' + fid + ': ' + ((e && e.message) || e)); }
+      }
+    });
+    if (ctx.user) {
+      updateRowById_('users', ctx.user.id, { video: '', updatedAt: new Date().toISOString() });
+      var updated = findUserByEmail_(ctx.email);
+      upsertDirectory_(ctx.email, {
+        name: updated.name,
+        lastProjectId: PROJ.id,
+        profile: JSON.stringify(profileSnapshot_(updated)),
+      });
+      return { user: projectUser_(updated, ctx, true) };
+    }
+    return {};
   },
 
   // ------------------------------------------------------------------ teams
