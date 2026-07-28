@@ -299,6 +299,47 @@ var ACTIONS = {
     }
   },
 
+  /** Public OG-card fields for a shareable member/project link. No auth — the
+   *  Cloudflare card.* Worker calls this to render social preview tags. Returns
+   *  only public, non-sensitive fields. kind: 'u' (member) | 'p' (project). */
+  og_card: function (params, ctx) {
+    var base = (PROJ && PROJ.siteUrl && /^https?:\/\//i.test(PROJ.siteUrl)) ? PROJ.siteUrl.replace(/\/+$/, '')
+      : ('https://' + (PROJ ? PROJ.id : 'ice2026') + '.designthinking.lk');
+    var ogImg = base + '/assets/og-image-v3.jpg';
+    var eventName = (PROJ && PROJ.name) || 'ICE';
+    var kind = String(params.kind || '');
+    if (kind === 'u') {
+      var u = rowById_('users', String(params.id || ''));
+      if (!u) return { ok: false, error: 'notfound', message: 'No such member.' };
+      var roles = String(u.role || '').split(',').map(function (r) { return r.trim(); });
+      var roleLabel = roles.indexOf('mentor') !== -1 ? 'Mentor' : roles.indexOf('admin') !== -1 ? 'Organizer' : 'Participant';
+      var parts = [roleLabel + ' at ' + eventName];
+      if (u.affiliation) parts.push(u.affiliation);
+      if (u.expertise) parts.push(u.expertise);
+      return { card: {
+        title: (u.name || 'Member') + ' — ' + eventName,
+        description: parts.join(' · '),
+        image: u.image || ogImg,
+        square: !!u.image, // a member photo suits a square summary card
+        appUrl: base + '/#/profile/' + u.id
+      } };
+    }
+    if (kind === 'p') {
+      var slot = Number(params.id);
+      var proj = null;
+      readTeamProjects_().forEach(function (p) { if (p.slot === slot) proj = p; });
+      if (!proj || !(proj.title || '').trim()) return { ok: false, error: 'notfound', message: 'No such project.' };
+      return { card: {
+        title: proj.title + ' — ' + eventName,
+        description: proj.description || 'A project at ' + eventName + '.',
+        image: ogImg,
+        square: false,
+        appUrl: base + '/#/projects/' + slot
+      } };
+    }
+    return { ok: false, error: 'validation', message: 'Unknown card kind.' };
+  },
+
   /** Is a workshop email free? Used by the register form to show the address the
    *  new account will get. available:true when no Workspace account holds it.
    *  Uses admin.directory.user (Users.get) — no extra scope. */
