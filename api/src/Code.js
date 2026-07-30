@@ -57,6 +57,14 @@ var CACHE_TTL_SECONDS = 60;
 var WORKSPACE_DOMAIN = 'designthinking.lk';
 var WORKSPACE_OU = '/ICE';
 
+// Shared access code: an un-invited person who sends this with `register`
+// bypasses the invite-only gate (registers as a participant). Kept in sync with
+// the frontend's C.ACCESS_CODE. Case-insensitive; empty string disables it.
+var ACCESS_CODE = 'ice2026';
+function accessCodeOk_(code) {
+  return !!ACCESS_CODE && String(code || '').trim().toLowerCase() === ACCESS_CODE.toLowerCase();
+}
+
 // workEmail = the minted @designthinking.lk address (blank until provisioned).
 // invites = the project's allowlist: register refuses emails without a row
 // here, and the row fixes the role. Rows outlive registration — "invited vs
@@ -688,9 +696,10 @@ var ACTIONS = {
       return { ok: false, error: 'closed', message: 'Registration is closed.' };
     }
     // Invitation gate: the invites tab is the allowlist, and the invite fixed
-    // the role — the card no longer asks. Global admins need no invite.
+    // the role — the card no longer asks. Global admins need no invite, and the
+    // shared access code opens the gate for an un-invited person (as participant).
     var invite = findInviteByEmail_(ctx.email);
-    if (!invite && !ctx.isAdmin) {
+    if (!invite && !ctx.isAdmin && !accessCodeOk_(params.accessCode)) {
       return { ok: false, error: 'notinvited', message: 'Registration is by invitation — ask an organizer to invite ' + ctx.email + '.' };
     }
     var first = clean_(params.firstName, 50);
@@ -2601,7 +2610,7 @@ function provisionWorkspaceAccount_(first, last, notifyEmail) {
 function sendWorkspaceCreds_(to, firstName, workEmail, password) {
   if (!to) return;
   try {
-    var ev = escapeHtmlA_(PROJ.name);
+    var ev = escapeHtmlA_(emailEventName_(PROJ.name));
     var html =
       '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0E0F11">' +
       '<h2 style="color:#6100FF;margin:0 0 6px">Your ' + ev + ' workshop account</h2>' +
@@ -2617,9 +2626,9 @@ function sendWorkspaceCreds_(to, firstName, workEmail, password) {
       '</div>';
     MailApp.sendEmail({
       to: to,
-      subject: 'Your ' + PROJ.name + ' workshop account',
+      subject: 'Your ' + emailEventName_(PROJ.name) + ' workshop account',
       htmlBody: html,
-      name: PROJ.name,
+      name: emailEventName_(PROJ.name),
     });
   } catch (err) {
     console.error('sendWorkspaceCreds_ failed: ' + ((err && err.stack) || err));
@@ -2632,9 +2641,16 @@ function sendWorkspaceCreds_(to, firstName, workEmail, password) {
  *  Deliverability: a plain-text body ships alongside the HTML and the link is
  *  also visible as text (HTML-only, button-only mail scores high on spam
  *  filters); replies go to the organizer who sent the invite. */
+// The ICE acronym is capitalised in copy even when the registry stored the
+// project name lower-cased ("ice 2026" → "ICE 2026"); other projects pass
+// through untouched.
+function emailEventName_(name) {
+  return String(name || '').replace(/\bice\b/gi, 'ICE');
+}
+
 function sendInviteEmail_(to, role, replyTo) {
   try {
-    var ev = escapeHtmlA_(PROJ.name);
+    var ev = escapeHtmlA_(emailEventName_(PROJ.name));
     var url = PROJ.siteUrl
       ? (/^https?:\/\//i.test(PROJ.siteUrl) ? PROJ.siteUrl : 'https://' + PROJ.siteUrl)
       : 'https://ice.designthinking.lk/?project=' + PROJ.id;
@@ -2644,7 +2660,7 @@ function sendInviteEmail_(to, role, replyTo) {
       '<h2 style="color:#6100FF;margin:0 0 6px">You&#39;re invited to ' + ev + '</h2>' +
       '<p>Hello,</p>' +
       '<p>The organizers have invited you to join <b>' + ev + '</b> as <b>' + roleLabel + '</b>. Complete your registration to meet the other ' +
-      (role === 'mentor' ? 'mentors and participants' : 'participants and mentors') + ' and get started.</p>' +
+      (role === 'mentor' ? 'mentors and participants' : 'participants and mentors') + ' to get started.</p>' +
       '<ol style="font-size:14.5px;line-height:1.7;padding-left:20px;margin:16px 0">' +
       '<li>Open the workshop site.</li>' +
       '<li>Sign in with Google using <b>this email address</b> (' + escapeHtmlA_(to) + ') — only invited addresses can register.</li>' +
@@ -2654,21 +2670,22 @@ function sendInviteEmail_(to, role, replyTo) {
       '<p style="font-size:13px;color:#555;margin:0 0 8px">Or open this link: <a href="' + escapeHtmlA_(url) + '">' + escapeHtmlA_(url) + '</a></p>' +
       '<p style="font-size:13px;color:#888;margin-top:22px">' + ev + ' · Augmented Human Lab</p>' +
       '</div>';
+    var evName = emailEventName_(PROJ.name);
     var text =
-      'You’re invited to ' + PROJ.name + '\n\n' +
-      'The organizers have invited you to join ' + PROJ.name + ' as ' + roleLabel + '.\n\n' +
+      'You’re invited to ' + evName + '\n\n' +
+      'The organizers have invited you to join ' + evName + ' as ' + roleLabel + '.\n\n' +
       '1. Open the workshop site: ' + url + '\n' +
       '2. Sign in with Google using this email address (' + to + ') — only invited addresses can register.\n' +
       '3. Fill in your profile card and join.\n\n' +
-      PROJ.name + ' · Augmented Human Lab';
+      evName + ' · Augmented Human Lab';
     var msg = {
       to: to,
       // Unique per send (time-stamped) so Gmail doesn't thread repeat invites
       // to the same address into one collapsed conversation.
-      subject: 'You’re invited to ' + PROJ.name + ' (' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, h:mm a') + ')',
+      subject: 'You’re invited to ' + evName + ' (' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMM d, h:mm a') + ')',
       body: text,
       htmlBody: html,
-      name: PROJ.name,
+      name: evName,
     };
     if (replyTo && EMAIL_RE.test(replyTo)) msg.replyTo = replyTo;
     MailApp.sendEmail(msg);
@@ -2685,7 +2702,7 @@ function sendInviteEmail_(to, role, replyTo) {
 function sendWorkspaceWelcomeBack_(to, firstName, workEmail) {
   if (!to) return;
   try {
-    var ev = escapeHtmlA_(PROJ.name);
+    var ev = escapeHtmlA_(emailEventName_(PROJ.name));
     var html =
       '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0E0F11">' +
       '<h2 style="color:#6100FF;margin:0 0 6px">Welcome back to ' + ev + '</h2>' +
@@ -2700,9 +2717,9 @@ function sendWorkspaceWelcomeBack_(to, firstName, workEmail) {
       '</div>';
     MailApp.sendEmail({
       to: to,
-      subject: 'Your ' + PROJ.name + ' workshop account',
+      subject: 'Your ' + emailEventName_(PROJ.name) + ' workshop account',
       htmlBody: html,
-      name: PROJ.name,
+      name: emailEventName_(PROJ.name),
     });
   } catch (err) {
     console.error('sendWorkspaceWelcomeBack_ failed: ' + ((err && err.stack) || err));
