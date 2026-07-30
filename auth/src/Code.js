@@ -71,8 +71,7 @@ function doGet(e) {
   // this browser and continues back to this exec URL (re-running doGet as the
   // chosen account). continue= must stay on a Google-owned host, which the
   // script.google.com exec URL satisfies.
-  var self = ScriptApp.getService().getUrl() +
-    '?redirect=' + encodeURIComponent(redirect);
+  var self = canonicalExecUrl_() + '?redirect=' + encodeURIComponent(redirect);
   var switchUrl = 'https://accounts.google.com/AccountChooser?continue=' +
     encodeURIComponent(self);
 
@@ -147,6 +146,15 @@ function isAllowedRedirect_(url) {
   return false;
 }
 
+/** The deployment's exec URL WITHOUT the "/a/<domain>/" prefix Google adds when
+ *  the app is opened by a Workspace account. That prefix pins the URL to that
+ *  domain, so "Use a different account" could never switch to a personal (or
+ *  other-domain) account — it kept resolving back to the Workspace session.
+ *  The canonical /macros/s/<id>/exec form lets the AccountChooser switch freely. */
+function canonicalExecUrl_() {
+  return ScriptApp.getService().getUrl().replace(/\/a\/[^/]+\/macros\//, '/macros/');
+}
+
 /** Which project the redirect is for — subdomain ({slug}.designthinking.lk),
  *  else a ?project= param, else the default. Mirrors the frontend's resolution. */
 function projectSlugFromRedirect_(url) {
@@ -186,7 +194,7 @@ function isEmailAllowed_(email, slug, code) {
  *  only "use a different account", plus an access-code path (reloads this
  *  broker with ?code=, which the API re-checks). */
 function renderNotInvited_(email, redirect) {
-  var self = ScriptApp.getService().getUrl();
+  var self = canonicalExecUrl_();
   var switchUrl = 'https://accounts.google.com/AccountChooser?continue=' +
     encodeURIComponent(self + '?redirect=' + encodeURIComponent(redirect));
   var page = HtmlService.createHtmlOutput(pageShell_(
