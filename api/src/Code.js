@@ -184,6 +184,12 @@ function handle_(params) {
         rolesOf_(ctx.user).length === 0) {
       return json_({ ok: false, error: 'norole', message: 'Your account has no assigned role. Contact an organizer to restore access.' });
     }
+    // Signed-in but NOT a member (not registered here, not a global admin): only
+    // the registration-flow actions are allowed. This closes the hole where any
+    // Google account with a valid token could reach members-only endpoints.
+    if (AUTH_REQUIRED[action] && ctx.email && !ctx.isAdmin && !ctx.user && !PRE_MEMBER_OK[action]) {
+      return json_({ ok: false, error: 'notinvited', message: 'This account is not a member of ' + (PROJ ? PROJ.name : 'this project') + '. Sign in with your invited account.' });
+    }
 
     var result = fn(params, ctx);
     result.ok = result.ok !== false;
@@ -266,6 +272,14 @@ var AUTH_REQUIRED = {
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
   wallet_link: 1, project_wallet_link: 1,
+};
+
+// Registration-flow actions a signed-in person may call BEFORE they're a member
+// (register itself is invite/access-code gated). Everything else AUTH_REQUIRED is
+// members-only — see the gate in handle_.
+var PRE_MEMBER_OK = {
+  me: 1, register: 1, check_email: 1, check_url: 1, persona: 1,
+  upload_image: 1, upload_profile_video: 1, remove_profile_video: 1,
 };
 
 var ADMIN_REQUIRED = {
@@ -480,6 +494,11 @@ var ACTIONS = {
    *  grant it, then redeploy. Until then this returns configured:false and
    *  the frontend keeps its skeleton grid. Cached 5 minutes. */
   program: function (params, ctx) {
+    // Members-only: a signed-in but un-invited/un-registered Google account must
+    // not see the schedule. (Admins and role-holding members pass.)
+    if (!ctx.isAdmin && !(ctx.user && rolesOf_(ctx.user).length)) {
+      return { ok: false, error: 'forbidden', message: 'The programme is for registered members.' };
+    }
     var calId = getConfig_('PROGRAM_CALENDAR_ID_' + PROJ.id, '') || getConfig_('PROGRAM_CALENDAR_ID', '');
     if (!calId) return { configured: false, events: [] };
     var cache = CacheService.getScriptCache();
