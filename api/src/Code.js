@@ -2642,10 +2642,10 @@ function sendWorkspaceCreds_(to, firstName, workEmail, password) {
  *  also visible as text (HTML-only, button-only mail scores high on spam
  *  filters); replies go to the organizer who sent the invite. */
 // The ICE acronym is capitalised in copy even when the registry stored the
-// project name lower-cased ("ice 2026" → "ICE 2026"); other projects pass
-// through untouched.
+// project name lower-cased — including the glued form ("ice2026" → "ICE2026"
+// and "ice 2026" → "ICE 2026"). Other projects pass through untouched.
 function emailEventName_(name) {
-  return String(name || '').replace(/\bice\b/gi, 'ICE');
+  return String(name || '').replace(/\bice(\d*)/gi, function (m, digits) { return 'ICE' + digits; });
 }
 
 function sendInviteEmail_(to, role, replyTo) {
