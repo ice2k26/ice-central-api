@@ -298,6 +298,27 @@ var ACTIONS = {
 
   ping: function () { return { pong: true, now: new Date().toISOString() }; },
 
+  /** Pre-sign-in allowlist check, called SERVER-TO-SERVER by the auth broker
+   *  (which has no user token yet). Authenticated by an HMAC over "email|project"
+   *  with the shared SECRET, so only the broker can ask. Returns whether this
+   *  email may enter the project — invited, already registered, a global admin,
+   *  or carrying the valid access code — so the broker can refuse a token to an
+   *  un-invited account instead of showing "Continue". */
+  auth_allowed: function (params, ctx) {
+    var email = String(params.email || '').toLowerCase().trim();
+    var expected = Utilities.base64EncodeWebSafe(
+      Utilities.computeHmacSha256Signature(email + '|' + String(params.project || ''), SECRET)
+    ).replace(/=+$/, '');
+    if (!params.sig || String(params.sig) !== expected) {
+      return { ok: false, error: 'forbidden' };
+    }
+    var canon = canonicalEmail_(email);
+    var allowed = isAdminEmail_(email) || isAdminEmail_(canon) ||
+      !!findUserByEmail_(canon) || !!findUserByWorkEmail_(email) ||
+      !!findInviteByEmail_(canon) || accessCodeOk_(params.accessCode);
+    return { ok: true, allowed: allowed };
+  },
+
   /** Server-side reachability check for a profile link (no CORS). Returns exists:
    *  true unless the host doesn't resolve or replies 404/410. Bot-blocked hosts
    *  (LinkedIn 999, 401/403) count as existing — the page is there, it just won't

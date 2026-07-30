@@ -17,6 +17,12 @@
 
 var TOKEN_TTL_DAYS = 30;
 
+// The API deployment (same one the frontend calls). The broker asks it, before
+// minting a token, whether this email may enter the project — so an un-invited
+// account is turned away here instead of continuing into the app.
+var API_URL = 'https://script.google.com/macros/s/AKfycbz0THh0OrmG8umv5ZomVvv1kQu7Ogs1jYp2tKqJFOe6gAMWGnL5Y5_Ww5hZOFVeNSA/exec';
+var DEFAULT_PROJECT = 'ice2026';
+
 // Redirect allowlist — the token is only ever handed to a trusted origin.
 // Every project lives on its own {slug}.designthinking.lk subdomain, so we
 // allow ANY https subdomain of designthinking.lk (wildcard) — new projects work
@@ -45,6 +51,14 @@ function doGet(e) {
       'Invalid redirect',
       'This sign-in link points to an unrecognized site (' + escapeHtml_(redirect) + '). Please start again from the official ICE workshop website.'
     );
+  }
+
+  // Invite gate: refuse a token to an account that isn't a member of this
+  // project (invited / registered / admin / valid access code). The access code
+  // (if any) is carried on the URL from the "Continue with code" form below.
+  var slug = projectSlugFromRedirect_(redirect);
+  if (!isEmailAllowed_(email, slug, params.code || '')) {
+    return renderNotInvited_(email, redirect);
   }
 
   var token = mintToken_(email);
@@ -103,6 +117,12 @@ function pageShell_(title, inner) {
     'background:linear-gradient(90deg,#00D7EE 0%,#2E6BF6 55%,#6100FF 100%);' +
     'box-shadow:0 4px 16px -4px rgba(97,0,255,0.45);transition:filter .15s,transform .1s}' +
     '.btn:hover{filter:brightness(1.06);text-decoration:none}.btn:active{transform:translateY(1px)}' +
+    '.code-form{display:flex;gap:8px;justify-content:center;max-width:20rem;margin:22px auto 0}' +
+    '.code-form input{flex:1;min-width:0;padding:9px 12px;border-radius:10px;' +
+    'border:1px solid rgba(127,127,127,0.45);background:transparent;color:var(--text);font-size:14px;outline:none}' +
+    '.code-form input:focus{border-color:var(--accent)}' +
+    '.code-form button{flex:none;padding:9px 16px;border-radius:999px;border:1px solid var(--accent);' +
+    'background:transparent;color:var(--accent);font-size:14px;font-weight:600;cursor:pointer}' +
     '</style></head><body><main>' +
     '<svg class="mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="ICE">' +
     '<defs><linearGradient id="g" x1="1" y1="0" x2="0" y2="1">' +
@@ -125,6 +145,66 @@ function isAllowedRedirect_(url) {
   // Local dev.
   if (url.indexOf('http://localhost:') === 0 || url.indexOf('http://127.0.0.1:') === 0) return true;
   return false;
+}
+
+/** Which project the redirect is for — subdomain ({slug}.designthinking.lk),
+ *  else a ?project= param, else the default. Mirrors the frontend's resolution. */
+function projectSlugFromRedirect_(url) {
+  var m = /^https:\/\/([a-z0-9-]+)\.designthinking\.lk/i.exec(url || '');
+  if (m && m[1].toLowerCase() !== 'www') return m[1].toLowerCase();
+  var pm = /[?&]project=([a-z0-9_-]+)/i.exec(url || '');
+  if (pm) return pm[1].toLowerCase();
+  return DEFAULT_PROJECT;
+}
+
+/** Ask the API (HMAC-authenticated) whether this email may enter the project.
+ *  Fail-OPEN on any error — the app and API still enforce membership, so a
+ *  transient outage never wrongly locks a legitimate member out. */
+function isEmailAllowed_(email, slug, code) {
+  try {
+    var secret = PropertiesService.getScriptProperties().getProperty('SECRET');
+    if (!secret) return true; // can't sign the request → fall through
+    var sig = b64url_(Utilities.computeHmacSha256Signature(email + '|' + slug, secret));
+    var payload = { action: 'auth_allowed', project: slug, email: email, sig: sig };
+    if (code) payload.accessCode = code;
+    var res = UrlFetchApp.fetch(API_URL, {
+      method: 'post',
+      contentType: 'text/plain;charset=utf-8',
+      payload: JSON.stringify(payload),
+      followRedirects: true,
+      muteHttpExceptions: true,
+    });
+    var data = JSON.parse(res.getContentText());
+    // Only an explicit allowed:false turns them away; anything else fails open.
+    return !(data && data.ok === true && data.allowed === false);
+  } catch (err) {
+    return true;
+  }
+}
+
+/** Shown when the signed-in account isn't a member: no token, no Continue —
+ *  only "use a different account", plus an access-code path (reloads this
+ *  broker with ?code=, which the API re-checks). */
+function renderNotInvited_(email, redirect) {
+  var self = ScriptApp.getService().getUrl();
+  var switchUrl = 'https://accounts.google.com/AccountChooser?continue=' +
+    encodeURIComponent(self + '?redirect=' + encodeURIComponent(redirect));
+  var page = HtmlService.createHtmlOutput(pageShell_(
+    'Not invited',
+    '<h1>This account isn&#39;t invited</h1>' +
+    '<p class="body">You&#39;re signed in as <b>' + escapeHtml_(email) + '</b>.</p>' +
+    '<p class="muted">This workshop is invite-only. Sign in with the Google account your invitation was sent to, or ask the organizers to invite you.</p>' +
+    '<p style="margin-top:22px"><a class="btn" href="' + switchUrl.replace(/"/g, '&quot;') + '" target="_top">Use a different account</a></p>' +
+    // GET form: `redirect` must be a hidden FIELD (a query string on the action
+    // URL is dropped by a GET submit). Reloads the broker with ?redirect&code.
+    '<form method="get" action="' + escapeHtml_(self) + '" target="_top" class="code-form">' +
+    '<input type="hidden" name="redirect" value="' + escapeHtml_(redirect) + '">' +
+    '<input type="text" name="code" placeholder="Have an access code?" autocomplete="off" spellcheck="false">' +
+    '<button type="submit">Continue</button>' +
+    '</form>'
+  ));
+  page.setTitle('ICE — Not invited');
+  return page;
 }
 
 /** token = base64url("email|expiryMillis") + "." + base64url(hmac) */
