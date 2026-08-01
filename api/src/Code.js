@@ -89,6 +89,11 @@ var TABLES = {
   // pushed to Google/Apple wallets. This tab doubles as the send history.
   wallet_pushes: ['id', 'message', 'sentBy', 'sentAt', 'googleCount', 'appleCount'],
   options: ['category', 'value'],
+  // Shared tools/resources. scope = 'global' (whole project) | 'team' (one team,
+  // via teamId). Each carries an optional description, url and secret; a card
+  // shows whichever are set. Mentors/admins may add global; anyone on a team may
+  // add team tools for their own team.
+  tools: ['id', 'scope', 'teamId', 'title', 'description', 'url', 'secret', 'createdBy', 'createdAt', 'updatedAt'],
 };
 
 // Seeded into the "options" tab on first read so admins have rows to edit.
@@ -266,6 +271,7 @@ var AUTH_REQUIRED = {
   team_link_add: 1, team_link_delete: 1, team_post_add: 1,
   team_project_update: 1, upload_project_video: 1,
   msg_send: 1, msg_inbox: 1, msg_thread: 1,
+  tools_list: 1, tool_add: 1, tool_update: 1, tool_delete: 1,
   ann_create: 1, ann_update: 1, ann_delete: 1,
   admin_add_role: 1, admin_remove_role: 1, admin_delete_user: 1, admin_set_config: 1, admin_provision_email: 1,
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
@@ -558,6 +564,82 @@ var ACTIONS = {
     }
     cache.put(key, JSON.stringify(out), 300);
     return out;
+  },
+
+  // ------------------------------------------------------------------- tools
+  /** Tools/resources the signed-in member may see: every GLOBAL tool for the
+   *  project, plus the TEAM tools for the member's own team. Secrets are only
+   *  ever returned here, so it's members-only (AUTH_REQUIRED). Also reports what
+   *  the member may create so the frontend can gate the add form. */
+  tools_list: function (params, ctx) {
+    var myTeam = ctx.user ? teamOfUser_(ctx.user.id) : null;
+    var myTeamId = myTeam ? myTeam.id : '';
+    var tools = readTable_('tools').filter(function (r) {
+      if (r.scope === 'global') return true;
+      return r.scope === 'team' && myTeamId && r.teamId === myTeamId;
+    }).map(function (r) { return publicTool_(r, ctx, myTeamId); });
+    var isMentorAdmin = !!(ctx.isAdmin || (ctx.user && hasRole_(ctx.user, 'mentor')));
+    return {
+      tools: tools,
+      canAddGlobal: isMentorAdmin,
+      canAddTeam: !!myTeamId,     // must be on a team to add a team tool
+      myTeam: myTeam ? { id: myTeam.id, name: myTeam.name } : null,
+    };
+  },
+
+  tool_add: function (params, ctx) {
+    if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
+    var scope = params.scope === 'global' ? 'global' : 'team';
+    var isMentorAdmin = !!(ctx.isAdmin || hasRole_(ctx.user, 'mentor'));
+    if (scope === 'global' && !isMentorAdmin) {
+      return { ok: false, error: 'forbidden', message: 'Only organizers and mentors can add global tools.' };
+    }
+    var teamId = '';
+    if (scope === 'team') {
+      var myTeam = teamOfUser_(ctx.user.id);
+      if (!myTeam) return { ok: false, error: 'noteam', message: 'Join a team first to add a team tool.' };
+      teamId = myTeam.id;
+    }
+    var fields = toolFields_(params);
+    if (fields.error) return fields;
+    var now = new Date().toISOString();
+    var tool = {
+      id: Utilities.getUuid(), scope: scope, teamId: teamId,
+      title: fields.title, description: fields.description, url: fields.url, secret: fields.secret,
+      createdBy: ctx.user.id, createdAt: now, updatedAt: now,
+    };
+    appendRow_('tools', tool);
+    return { tool: publicTool_(tool, ctx, teamId) };
+  },
+
+  tool_update: function (params, ctx) {
+    if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
+    var tool = rowById_('tools', params.id);
+    if (!tool) return { ok: false, error: 'notfound', message: 'Tool not found.' };
+    if (!canManageTool_(tool, ctx)) return { ok: false, error: 'forbidden', message: 'You can’t edit this tool.' };
+    // scope is fixed once created; title/description/url/secret are editable
+    var merged = {
+      title: params.title != null ? params.title : tool.title,
+      description: params.description != null ? params.description : tool.description,
+      url: params.url != null ? params.url : tool.url,
+      secret: params.secret != null ? params.secret : tool.secret,
+    };
+    var fields = toolFields_(merged);
+    if (fields.error) return fields;
+    var patch = { title: fields.title, description: fields.description, url: fields.url, secret: fields.secret,
+                  updatedAt: new Date().toISOString() };
+    updateRowById_('tools', tool.id, patch);
+    var myTeam = ctx.user ? teamOfUser_(ctx.user.id) : null;
+    return { tool: publicTool_(Object.assign({}, tool, patch), ctx, myTeam ? myTeam.id : '') };
+  },
+
+  tool_delete: function (params, ctx) {
+    if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
+    var tool = rowById_('tools', params.id);
+    if (!tool) return { ok: true };  // already gone — idempotent
+    if (!canManageTool_(tool, ctx)) return { ok: false, error: 'forbidden', message: 'You can’t remove this tool.' };
+    deleteRowById_('tools', tool.id);
+    return { ok: true };
   },
 
   /** Mint a short-lived (30 min) wallet link for the signed-in user. The
@@ -1800,6 +1882,53 @@ function canManageTeam_(team, ctx) {
 
 function isTeamMember_(team, userId) {
   return parseArr_(team.members).indexOf(userId) !== -1;
+}
+
+// The team a user belongs to (first match), or null. One person is expected on
+// a single workshop team.
+function teamOfUser_(userId) {
+  var teams = readTable_('teams');
+  for (var i = 0; i < teams.length; i++) {
+    if (isTeamMember_(teams[i], userId)) return teams[i];
+  }
+  return null;
+}
+
+// May this context create/edit/delete this tool?  Admins: anything. Global
+// tools: mentors. Team tools: any member of that team.
+function canManageTool_(tool, ctx) {
+  if (ctx.isAdmin) return true;
+  if (!ctx.user) return false;
+  if (tool.scope === 'global') return hasRole_(ctx.user, 'mentor');
+  var team = rowById_('teams', tool.teamId);
+  return !!(team && isTeamMember_(team, ctx.user.id));
+}
+
+// Clean + validate the shared tool/link/secret fields. Returns {error,...} on
+// failure, otherwise the sanitised {title, description, url, secret}.
+function toolFields_(params) {
+  var title = clean_(params.title, 44);
+  if (!title) return { ok: false, error: 'validation', message: 'A title is required.' };
+  var description = clean_(params.description, 100);
+  var url = clean_(params.url, 500);
+  if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;   // tolerate a bare host
+  var secret = clean_(params.secret, 2000);
+  if (!description && !url && !secret) {
+    return { ok: false, error: 'validation', message: 'Add at least one of description, link or secret.' };
+  }
+  return { title: title, description: description, url: url, secret: secret };
+}
+
+// The client shape of a tool. The secret IS returned (only to members who can
+// see the tool — tools_list already filters to those), plus a `canManage` flag
+// so the frontend can show edit/delete without re-deriving the rules.
+function publicTool_(r, ctx, myTeamId) {
+  return {
+    id: r.id, scope: r.scope, teamId: r.teamId || '',
+    title: r.title, description: r.description || '', url: r.url || '', secret: r.secret || '',
+    createdBy: r.createdBy, createdAt: r.createdAt, updatedAt: r.updatedAt,
+    canManage: ctx ? canManageTool_(r, ctx) : false,
+  };
 }
 
 // ------------------------------------------------------------------ helpers
