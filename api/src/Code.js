@@ -572,6 +572,7 @@ var ACTIONS = {
    *  ever returned here, so it's members-only (AUTH_REQUIRED). Also reports what
    *  the member may create so the frontend can gate the add form. */
   tools_list: function (params, ctx) {
+    gid_('tools'); // create the tab on first use (existing project DBs predate it)
     var myTeam = ctx.user ? teamOfUser_(ctx.user.id) : null;
     var myTeamId = myTeam ? myTeam.id : '';
     var tools = readTable_('tools').filter(function (r) {
@@ -589,6 +590,7 @@ var ACTIONS = {
 
   tool_add: function (params, ctx) {
     if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
+    gid_('tools'); // ensure the tab exists before appending
     var scope = params.scope === 'global' ? 'global' : 'team';
     var isMentorAdmin = !!(ctx.isAdmin || hasRole_(ctx.user, 'mentor'));
     if (scope === 'global' && !isMentorAdmin) {
