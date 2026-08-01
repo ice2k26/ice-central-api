@@ -65,12 +65,21 @@ function accessCodeOk_(code) {
   return !!ACCESS_CODE && String(code || '').trim().toLowerCase() === ACCESS_CODE.toLowerCase();
 }
 
+// A GitHub username is mandatory on the profile card. Someone without an account
+// types this keyword into the GitHub field to waive the requirement — they pass
+// validation but are NEVER added to the org (see inviteToGithubOrg_). Kept in
+// sync with the frontend's C.GITHUB_BYPASS. Case-insensitive.
+var GITHUB_BYPASS = 'ice2026';
+function githubBypassOk_(code) {
+  return !!GITHUB_BYPASS && String(code || '').trim().toLowerCase() === GITHUB_BYPASS.toLowerCase();
+}
+
 // workEmail = the minted @designthinking.lk address (blank until provisioned).
 // invites = the project's allowlist: register refuses emails without a row
 // here, and the row fixes the role. Rows outlive registration — "invited vs
 // registered" is derived by matching users.email.
 var TABLES = {
-  users: ['id', 'email', 'name', 'image', 'bio', 'skills', 'affiliation', 'expertise', 'gender', 'links', 'video', 'role', 'createdAt', 'updatedAt', 'workEmail', 'videoName'],
+  users: ['id', 'email', 'name', 'image', 'bio', 'skills', 'affiliation', 'expertise', 'gender', 'links', 'video', 'role', 'createdAt', 'updatedAt', 'workEmail', 'videoName', 'githubInvited'],
   invites: ['id', 'email', 'role', 'invitedBy', 'createdAt', 'lastSentAt', 'sendCount'],
   // 'score' is appended LAST so existing team rows (8 cols) stay column-aligned.
   teams: ['id', 'name', 'description', 'coverImage', 'lookingFor', 'creatorId', 'members', 'createdAt', 'updatedAt', 'score'],
@@ -277,6 +286,7 @@ var AUTH_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
+  admin_github_backfill: 1,
   wallet_link: 1, project_wallet_link: 1,
 };
 
@@ -293,6 +303,7 @@ var ADMIN_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
+  admin_github_backfill: 1,
 };
 
 // Mentors and admins may post announcements; edit/delete is author-or-admin.
@@ -835,6 +846,12 @@ var ACTIONS = {
       first = parts.shift() || '';
       last = parts.join(' ');
     }
+    // GitHub is mandatory. Reject when no GitHub handle is present unless the
+    // person supplied the bypass keyword (they have no account). Checked BEFORE
+    // provisioning so a rejected registration leaves no orphaned workspace account.
+    if (!githubHandleFromLinks_(params.links) && !githubBypassOk_(params.githubBypass)) {
+      return { ok: false, error: 'validation', message: 'A GitHub username is required to register.' };
+    }
     var now = new Date().toISOString();
     // Workshop @designthinking.lk account: returning people (in the directory)
     // keep the one they already have — no duplicate mint, no new password.
@@ -872,6 +889,11 @@ var ACTIONS = {
       updatedAt: now,
       workEmail: workEmail,
     };
+    // GitHub org: invite the person to the designthinking-lk org as a plain
+    // member if their profile card carries a GitHub handle (and it isn't
+    // whitelisted). Guarded — never blocks registration; stores the handle so
+    // we don't re-invite on later profile edits.
+    user.githubInvited = inviteToGithubOrg_(user.links, ctx.email);
     appendRow_('users', user);
     upsertDirectory_(ctx.email, {
       workEmail: workEmail,
@@ -896,7 +918,13 @@ var ACTIONS = {
     if (params.affiliation !== undefined) patch.affiliation = clean_(params.affiliation, 200);
     if (params.expertise !== undefined) patch.expertise = clean_(params.expertise, 500);
     if (params.gender !== undefined) patch.gender = clean_(params.gender, 30);
-    if (params.links !== undefined) patch.links = jsonArr_(params.links, 10, 300);
+    if (params.links !== undefined) {
+      // GitHub stays mandatory on edits too (unless the bypass keyword is given).
+      if (!githubHandleFromLinks_(params.links) && !githubBypassOk_(params.githubBypass)) {
+        return { ok: false, error: 'validation', message: 'A GitHub username is required.' };
+      }
+      patch.links = jsonArr_(params.links, 10, 300);
+    }
     // Intro video is now an uploaded Drive clip (see upload_profile_video); only
     // a Drive URL (or '' to clear) is stored. Legacy YouTube links get dropped.
     if (params.video !== undefined) {
@@ -915,6 +943,15 @@ var ACTIONS = {
       lastProjectId: PROJ.id,
       profile: JSON.stringify(profileSnapshot_(updated)),
     });
+    // First time a member fills in their GitHub handle (registered without one,
+    // added it now) → invite them to the org and remember we did.
+    if (!updated.githubInvited) {
+      var ghHandle = inviteToGithubOrg_(updated.links, ctx.email);
+      if (ghHandle) {
+        updateRowById_('users', updated.id, { githubInvited: ghHandle });
+        updated.githubInvited = ghHandle;
+      }
+    }
     return { user: projectUser_(updated, ctx, true) };
   },
 
@@ -1569,6 +1606,28 @@ var ACTIONS = {
     updateRowById_('users', u.id, { workEmail: workEmail, updatedAt: new Date().toISOString() });
     upsertDirectory_(u.email, { workEmail: workEmail, name: u.name, lastProjectId: PROJ.id });
     return { workEmail: workEmail };
+  },
+
+  // One-off / catch-up: invite every already-registered member who has a GitHub
+  // handle but was never invited to the org (registered before this feature, or
+  // where the invite failed). Whitelisted handles are skipped. Safe to re-run —
+  // rows already carrying githubInvited are left alone. See inviteToGithubOrg_.
+  admin_github_backfill: function (params, ctx) {
+    var users = readTable_('users', true);
+    var invited = 0, already = 0, skipped = 0, noHandle = 0;
+    for (var i = 0; i < users.length; i++) {
+      var u = users[i];
+      if (u.githubInvited) { already++; continue; }
+      if (!githubHandleFromLinks_(u.links)) { noHandle++; continue; }
+      var handle = inviteToGithubOrg_(u.links, u.email);
+      if (handle) {
+        updateRowById_('users', u.id, { githubInvited: handle });
+        invited++;
+      } else {
+        skipped++; // whitelisted, no token, or API error — check the logs
+      }
+    }
+    return { total: users.length, invited: invited, already: already, skipped: skipped, noHandle: noHandle };
   },
 
   // ---------------------------------------------------------------- invites
@@ -2775,6 +2834,103 @@ function provisionWorkspaceAccount_(first, last, notifyEmail) {
     console.error('provisionWorkspaceAccount_ failed: ' + ((err && err.stack) || err));
     return '';
   }
+}
+
+// -------------------------------------------------- github org membership
+// On registration (and when a member later adds their GitHub handle) we invite
+// the person to the designthinking-lk GitHub org as a plain member. Config lives
+// in Script Properties:
+//   GITHUB_TOKEN          fine-grained PAT with the org's "Members: Read and
+//                         write" permission, or a classic PAT with admin:org.
+//                         Must be minted by a designthinking-lk org owner.
+//   GITHUB_ORG            target org — defaults to 'designthinking-lk' if unset.
+//   GITHUB_ORG_WHITELIST  comma-separated handles to NEVER auto-invite (org
+//                         owners, bots, or people managed by hand).
+// Guarded like account provisioning: any missing config or API failure is logged
+// and returns '' so a registration is never blocked. Returns the invited handle
+// (lowercased/original case as parsed) on success, '' otherwise.
+
+var GITHUB_DEFAULT_ORG = 'designthinking-lk';
+
+/** Pull the bare GitHub username out of a stored links value (an array or the
+ *  JSON string we persist). Matches 'github.com/<user>' with or without a
+ *  scheme and validates it as a GitHub handle (1–39 chars, alphanumeric or
+ *  single hyphens, not leading/trailing hyphen). Returns '' if none. */
+function githubHandleFromLinks_(links) {
+  var arr = Array.isArray(links) ? links : parseArr_(links);
+  for (var i = 0; i < arr.length; i++) {
+    var m = String(arr[i] || '').match(/github\.com\/([^\/?#\s]+)/i);
+    if (!m) continue;
+    var h = m[1].replace(/^@/, '');
+    if (/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(h)) return h;
+  }
+  return '';
+}
+
+/** Invite the person to the org as a member if their links carry a (non-
+ *  whitelisted) GitHub handle. Returns the handle on success, '' otherwise. */
+function inviteToGithubOrg_(links, notifyEmail) {
+  try {
+    var handle = githubHandleFromLinks_(links);
+    if (!handle) return '';
+    // Never treat the GitHub-waiver keyword as a real handle to invite.
+    if (githubBypassOk_(handle)) return '';
+    var props = PropertiesService.getScriptProperties();
+    var token = props.getProperty('GITHUB_TOKEN');
+    if (!token) {
+      console.warn('[github] GITHUB_TOKEN not set — skipping org invite for ' + handle);
+      return '';
+    }
+    var org = props.getProperty('GITHUB_ORG') || GITHUB_DEFAULT_ORG;
+    var whitelist = String(props.getProperty('GITHUB_ORG_WHITELIST') || '')
+      .split(',').map(function (s) { return s.trim().toLowerCase(); })
+      .filter(function (s) { return s.length > 0; });
+    if (whitelist.indexOf(handle.toLowerCase()) !== -1) {
+      console.log('[github] %s is whitelisted — not inviting', handle);
+      return '';
+    }
+    var resp = UrlFetchApp.fetch(
+      'https://api.github.com/orgs/' + encodeURIComponent(org) + '/memberships/' + encodeURIComponent(handle),
+      {
+        method: 'put',
+        contentType: 'application/json',
+        headers: {
+          Authorization: 'Bearer ' + token,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': 'ice-central-api',
+        },
+        muteHttpExceptions: true,
+        payload: JSON.stringify({ role: 'member' }),
+      }
+    );
+    var code = resp.getResponseCode();
+    if (code === 200) {
+      var body = {};
+      try { body = JSON.parse(resp.getContentText() || '{}'); } catch (e) { body = {}; }
+      console.log('[github] %s → org %s (state=%s)', handle, org, body.state || '?');
+      return handle;
+    }
+    console.error('[github] invite failed for %s: HTTP %s %s', handle, code, resp.getContentText());
+    return '';
+  } catch (err) {
+    console.error('inviteToGithubOrg_ failed: ' + ((err && err.stack) || err));
+    return '';
+  }
+}
+
+/** EDITOR-RUNNABLE: sweep a project's already-registered members and invite any
+ *  with a GitHub handle who were never invited. Runs as the script owner from
+ *  the Apps Script editor (Run ▸ runGithubBackfill) — no auth token needed, the
+ *  handle_ admin gate is bypassed because we call the action directly. Change
+ *  the projectId below to backfill a project other than the default (ice2026).
+ *  Result (counts) is written to the execution log. */
+function runGithubBackfill(projectId) {
+  PROJ = getProject_(projectId || DEFAULT_PROJECT);
+  if (!PROJ) throw new Error('Unknown project: ' + (projectId || DEFAULT_PROJECT));
+  var res = ACTIONS.admin_github_backfill({}, { isAdmin: true });
+  console.log('[github] backfill %s → %s', PROJ.id, JSON.stringify(res));
+  return res;
 }
 
 /** Email the new workshop credentials to the address the person signed in with. */
