@@ -243,12 +243,21 @@ function isAdminEmail_(email) {
 
 // -------------------------------------------------------------------- roles
 // users.role holds up to MAX_ROLES comma-separated roles: 'admin' plus one of
-// 'participant'/'mentor' (those two never coexist). 'none' = every role was
-// removed — the row and all data stay, but the person is treated like a
-// visitor until an admin assigns a role again. A blank/unknown value counts
-// as participant (the historical default). Mirrored by rolesOf() in web/js/app.js.
+// the mutually-exclusive "track" roles 'participant'/'mentor'/'catalyst' (only
+// one of the three ever coexists). 'none' = every role was removed — the row
+// and all data stay, but the person is treated like a visitor until an admin
+// assigns a role again. A blank/unknown value counts as participant (the
+// historical default). Mirrored by rolesOf() in web/js/app.js.
+//
+// catalyst = a special guest of the program (a "catalyst" who sparks it) who is
+// NOT on a team and does NOT build a project — so, like an admin-only account,
+// they are excluded from the team board and project rosters (isCommunityMember_
+// stays participant||mentor). Unlike admins they hold no platform powers, and
+// unlike admins they DO appear on the ICE letter formation (in reserved slots).
 
-var PLATFORM_ROLES = ['admin', 'participant', 'mentor'];
+var PLATFORM_ROLES = ['admin', 'participant', 'mentor', 'catalyst'];
+// The mutually-exclusive "track" a person sits in — at most one of these.
+var TRACK_ROLES = ['participant', 'mentor', 'catalyst'];
 var MAX_ROLES = 2;
 
 function rolesOf_(u) {
@@ -378,7 +387,7 @@ var ACTIONS = {
       var u = rowById_('users', String(params.id || ''));
       if (!u) return { ok: false, error: 'notfound', message: 'No such member.' };
       var roles = String(u.role || '').split(',').map(function (r) { return r.trim(); });
-      var roleLabel = roles.indexOf('mentor') !== -1 ? 'Mentor' : roles.indexOf('admin') !== -1 ? 'Organizer' : 'Participant';
+      var roleLabel = roles.indexOf('mentor') !== -1 ? 'Mentor' : roles.indexOf('catalyst') !== -1 ? 'Catalyst' : roles.indexOf('admin') !== -1 ? 'Organizer' : 'Participant';
       var parts = [roleLabel]; // event name already shows in the title/kicker
       if (u.affiliation) parts.push(u.affiliation);
       if (u.expertise) parts.push(u.expertise);
@@ -448,7 +457,7 @@ var ACTIONS = {
     if (!apiKey) return { text: '', disabled: true };
     var fields = {
       name: clean_(params.name, 100),
-      role: params.role === 'mentor' ? 'mentor (facilitator)' : 'participant',
+      role: params.role === 'mentor' ? 'mentor (facilitator)' : params.role === 'catalyst' ? 'catalyst (special guest)' : 'participant',
       affiliation: clean_(params.affiliation, 200),
       expertise: clean_(params.expertise, 500),
       bio: clean_(params.bio, 2000),
@@ -498,7 +507,7 @@ var ACTIONS = {
     var invite = null;
     if (ctx.email && !ctx.user) {
       var invRow = findInviteByEmail_(ctx.email);
-      if (invRow) invite = { role: invRow.role === 'mentor' ? 'mentor' : invRow.role === 'admin' ? 'admin' : 'participant' };
+      if (invRow) invite = { role: PLATFORM_ROLES.indexOf(String(invRow.role || '').toLowerCase()) !== -1 ? String(invRow.role).toLowerCase() : 'participant' };
     }
     return {
       registrationOpen: PROJ.registrationOpen,
@@ -837,6 +846,15 @@ var ACTIONS = {
     if (!invite && !ctx.isAdmin && !accessCodeOk_(params.accessCode)) {
       return { ok: false, error: 'notinvited', message: 'Registration is by invitation — ask an organizer to invite ' + ctx.email + '.' };
     }
+    // Role is pre-assigned by the invite (or forced to admin for global admins).
+    // Computed up front because it gates the GitHub requirement and workspace
+    // provisioning below — catalysts are program guests, not builders.
+    var assignedRole = isAdminEmail_(ctx.email) ? 'admin'
+        : (invite && invite.role === 'mentor') ? 'mentor'
+        : (invite && invite.role === 'admin') ? 'admin'
+        : (invite && invite.role === 'catalyst') ? 'catalyst'
+        : 'participant';
+    var isCatalyst = assignedRole === 'catalyst';
     var first = clean_(params.firstName, 50);
     var last = clean_(params.lastName, 50);
     var name = clean_(params.name, 100) || (first + ' ' + last).trim();
@@ -846,10 +864,12 @@ var ACTIONS = {
       first = parts.shift() || '';
       last = parts.join(' ');
     }
-    // GitHub is mandatory. Reject when no GitHub handle is present unless the
-    // person supplied the bypass keyword (they have no account). Checked BEFORE
-    // provisioning so a rejected registration leaves no orphaned workspace account.
-    if (!githubHandleFromLinks_(params.links) && !githubBypassOk_(params.githubBypass)) {
+    // GitHub is mandatory for builders (participants/mentors). Reject when no
+    // GitHub handle is present unless the person supplied the bypass keyword
+    // (they have no account). Checked BEFORE provisioning so a rejected
+    // registration leaves no orphaned workspace account. Catalysts are program
+    // guests, not builders — they are exempt.
+    if (!isCatalyst && !githubHandleFromLinks_(params.links) && !githubBypassOk_(params.githubBypass)) {
       return { ok: false, error: 'validation', message: 'A GitHub username is required to register.' };
     }
     var now = new Date().toISOString();
@@ -858,12 +878,14 @@ var ACTIONS = {
     // Otherwise mint one, unless this project has provisioning switched off
     // (test projects). Guarded: registration still succeeds (workEmail just
     // stays blank) if provisioning fails for any reason.
+    // Catalysts don't build, so they get no @designthinking.lk workshop account
+    // minted for them (a returning person keeps one they already have).
     var dir = findDirectory_(ctx.email);
     var workEmail = '';
     if (dir && dir.workEmail) {
       workEmail = dir.workEmail;
       sendWorkspaceWelcomeBack_(ctx.email, first, workEmail);
-    } else if (PROJ.provisionAccounts) {
+    } else if (PROJ.provisionAccounts && !isCatalyst) {
       workEmail = provisionWorkspaceAccount_(first, last, ctx.email);
     }
     var user = {
@@ -880,11 +902,9 @@ var ACTIONS = {
       video: clean_(params.video, 300),
       videoName: clean_(params.videoName, 120),
       // Pre-assigned by the invite: participant (member/student), mentor
-      // (facilitator) or admin (organizer). Global admins always register as admin.
-      role: isAdminEmail_(ctx.email) ? 'admin'
-          : (invite && invite.role === 'mentor') ? 'mentor'
-          : (invite && invite.role === 'admin') ? 'admin'
-          : 'participant',
+      // (facilitator), catalyst (guest) or admin (organizer). Global admins
+      // always register as admin. Computed above as assignedRole.
+      role: assignedRole,
       createdAt: now,
       updatedAt: now,
       workEmail: workEmail,
@@ -892,8 +912,8 @@ var ACTIONS = {
     // GitHub org: invite the person to the designthinking-lk org as a plain
     // member if their profile card carries a GitHub handle (and it isn't
     // whitelisted). Guarded — never blocks registration; stores the handle so
-    // we don't re-invite on later profile edits.
-    user.githubInvited = inviteToGithubOrg_(user.links, ctx.email);
+    // we don't re-invite on later profile edits. Catalysts (guests) are skipped.
+    user.githubInvited = isCatalyst ? '' : inviteToGithubOrg_(user.links, ctx.email);
     appendRow_('users', user);
     upsertDirectory_(ctx.email, {
       workEmail: workEmail,
@@ -1164,6 +1184,7 @@ var ACTIONS = {
 
   join_team: function (params, ctx) {
     if (!ctx.user) return { ok: false, error: 'noprofile', message: 'Register first.' };
+    if (!isCommunityMember_(ctx.user)) return { ok: false, error: 'forbidden', message: 'Only participants and mentors can join a team.' };
     var team = rowById_('teams', params.teamId);
     if (!team) return { ok: false, error: 'notfound', message: 'Team not found.' };
     var members = parseArr_(team.members);
@@ -1423,7 +1444,7 @@ var ACTIONS = {
     if (!user) return { ok: false, error: 'notfound', message: 'User not found.' };
     var role = String(params.role || '').toLowerCase();
     if (PLATFORM_ROLES.indexOf(role) === -1) {
-      return { ok: false, error: 'validation', message: 'Role must be participant, mentor or admin.' };
+      return { ok: false, error: 'validation', message: 'Role must be participant, mentor, catalyst or admin.' };
     }
     var roles = rolesOf_(user);
     if (roles.indexOf(role) !== -1) {
@@ -1432,8 +1453,8 @@ var ACTIONS = {
     if (roles.length >= MAX_ROLES) {
       return { ok: false, error: 'validation', message: 'At most ' + MAX_ROLES + ' roles per person.' };
     }
-    if (role !== 'admin' && (roles.indexOf('participant') !== -1 || roles.indexOf('mentor') !== -1)) {
-      return { ok: false, error: 'validation', message: 'Participant and mentor never coexist — remove the current one first.' };
+    if (TRACK_ROLES.indexOf(role) !== -1 && roles.some(function (r) { return TRACK_ROLES.indexOf(r) !== -1; })) {
+      return { ok: false, error: 'validation', message: 'Participant, mentor and catalyst are mutually exclusive — remove the current one first.' };
     }
     updateRowById_('users', user.id, { role: roleValue_(roles.concat([role])), updatedAt: new Date().toISOString() });
     return { roles: rolesOf_(rowById_('users', user.id)) };
@@ -1637,8 +1658,8 @@ var ACTIONS = {
   // emails are skipped and reported.
   admin_invite: function (params, ctx) {
     var role = String(params.role || '').toLowerCase();
-    if (role !== 'participant' && role !== 'mentor' && role !== 'admin') {
-      return { ok: false, error: 'validation', message: 'Invite role must be participant, mentor or admin.' };
+    if (PLATFORM_ROLES.indexOf(role) === -1) {
+      return { ok: false, error: 'validation', message: 'Invite role must be participant, mentor, catalyst or admin.' };
     }
     var raw = Array.isArray(params.emails) ? params.emails : parseArr_(params.emails);
     var emails = [];
@@ -1705,8 +1726,8 @@ var ACTIONS = {
     if (letter && TEAM_LETTERS.indexOf(letter) === -1) {
       return { ok: false, error: 'validation', message: 'Team must be one of ' + TEAM_LETTERS.join(', ') + ' — or empty to unassign.' };
     }
-    if (letter && rolesOf_(user).length === 0) {
-      return { ok: false, error: 'validation', message: user.name + ' has no assigned role — add one before placing them in a team.' };
+    if (letter && !isCommunityMember_(user)) {
+      return { ok: false, error: 'validation', message: user.name + ' is not a participant or mentor — only community members can be placed in a team.' };
     }
     var now = new Date().toISOString();
     var teams = readTable_('teams', true);
@@ -2981,7 +3002,7 @@ function sendInviteEmail_(to, role, replyTo) {
     var url = PROJ.siteUrl
       ? (/^https?:\/\//i.test(PROJ.siteUrl) ? PROJ.siteUrl : 'https://' + PROJ.siteUrl)
       : 'https://ice.designthinking.lk/?project=' + PROJ.id;
-    var roleLabel = role === 'mentor' ? 'a mentor' : role === 'admin' ? 'an organizer' : 'a participant';
+    var roleLabel = role === 'mentor' ? 'a mentor' : role === 'admin' ? 'an organizer' : role === 'catalyst' ? 'a catalyst' : 'a participant';
     var html =
       '<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0E0F11">' +
       '<h2 style="color:#6100FF;margin:0 0 6px">You&#39;re invited to ' + ev + '</h2>' +

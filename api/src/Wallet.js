@@ -237,6 +237,7 @@ function walletRoleLabel_(user) {
   var roles = rolesOf_(user);
   if (roles.indexOf('mentor') !== -1) return 'Mentor';
   if (roles.indexOf('participant') !== -1) return 'Participant';
+  if (roles.indexOf('catalyst') !== -1) return 'Catalyst';
   if (roles.indexOf('admin') !== -1) return 'Admin';
   return 'Member';
 }
