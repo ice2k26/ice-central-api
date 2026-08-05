@@ -103,6 +103,9 @@ var TABLES = {
   // shows whichever are set. Mentors/admins may add global; anyone on a team may
   // add team tools for their own team.
   tools: ['id', 'scope', 'teamId', 'title', 'description', 'url', 'secret', 'createdBy', 'createdAt', 'updatedAt'],
+  // App-level event log surfaced in the admin "Logs" tab (Errors/Warnings/Info).
+  // Written by logEvent_ (best-effort); the tab is auto-created on first write.
+  logs: ['id', 'ts', 'severity', 'action', 'message', 'email'],
 };
 
 // Seeded into the "options" tab on first read so admins have rows to edit.
@@ -210,6 +213,7 @@ function handle_(params) {
     return json_(result);
   } catch (err) {
     console.error('handle_ failed', err && err.stack || err);
+    logEvent_('ERROR', String(params && params.action || ''), String(err && err.message || err));
     return json_({ ok: false, error: 'server', message: String(err && err.message || err) });
   }
 }
@@ -295,7 +299,7 @@ var AUTH_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
-  admin_github_backfill: 1,
+  admin_github_backfill: 1, admin_logs: 1,
   wallet_link: 1, project_wallet_link: 1,
 };
 
@@ -312,7 +316,7 @@ var ADMIN_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
-  admin_github_backfill: 1,
+  admin_github_backfill: 1, admin_logs: 1,
 };
 
 // Mentors and admins may post announcements; edit/delete is author-or-admin.
@@ -917,6 +921,7 @@ var ACTIONS = {
     // else (inviteToGithubOrg_ no-ops when there's no handle).
     user.githubInvited = inviteToGithubOrg_(user.links, ctx.email);
     appendRow_('users', user);
+    logEvent_('INFO', 'register', name + ' registered as ' + assignedRole, ctx.email);
     upsertDirectory_(ctx.email, {
       workEmail: workEmail,
       name: name,
@@ -1658,6 +1663,21 @@ var ACTIONS = {
   // invites tab and email each address an onboarding invitation. Inviting an
   // already-invited email updates its role and re-sends; already-registered
   // emails are skipped and reported.
+  // Admin "Logs" tab. severity bucket → the matching rows, newest first.
+  admin_logs: function (params, ctx) {
+    ensureLogsTab_();
+    var sev = String(params.severity || 'INFO').toUpperCase();
+    var want = sev === 'ERROR' ? ['ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY']
+             : sev === 'WARNING' ? ['WARNING']
+             : ['INFO', 'NOTICE', 'DEBUG'];
+    var rows = [];
+    try { rows = readTable_('logs', true); } catch (e) { rows = []; }
+    rows = rows.filter(function (r) { return want.indexOf(String(r.severity).toUpperCase()) !== -1; });
+    rows.sort(function (a, b) { return (a.ts < b.ts) ? 1 : (a.ts > b.ts ? -1 : 0); }); // newest first
+    var limit = Math.min(Number(params.limit) || 200, 500);
+    return { logs: rows.slice(0, limit) };
+  },
+
   admin_invite: function (params, ctx) {
     var role = String(params.role || '').toLowerCase();
     if (PLATFORM_ROLES.indexOf(role) === -1) {
@@ -1693,6 +1713,7 @@ var ACTIONS = {
       }
       (mailed ? sent : failed).push(email);
     });
+    if (sent.length) logEvent_('INFO', 'admin_invite', 'invited ' + sent.length + ' as ' + role, ctx.email);
     return { sent: sent, alreadyRegistered: alreadyRegistered, failed: failed, invites: readInvites_(true) };
   },
 
@@ -2533,6 +2554,42 @@ function invalidate_(name) {
   CacheService.getScriptCache().remove(tblKey_(name));
 }
 
+// The `logs` tab is created lazily (it's not part of the seeded project sheet).
+// Checked once per execution; uses the existing Drive/Sheets scope — no new auth.
+var LOGS_TAB_READY = false;
+function ensureLogsTab_() {
+  if (LOGS_TAB_READY) return true;
+  try {
+    var ss = Sheets.Spreadsheets.get(dbId_());
+    var exists = (ss.sheets || []).some(function (s) { return s.properties && s.properties.title === 'logs'; });
+    if (!exists) {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{ addSheet: { properties: { title: 'logs' } } }] }, dbId_());
+      Sheets.Spreadsheets.Values.update({ values: [TABLES.logs] }, dbId_(), 'logs!A1', { valueInputOption: 'RAW' });
+    }
+    LOGS_TAB_READY = true;
+    return true;
+  } catch (e) {
+    return false; // logging is best-effort — never surface this
+  }
+}
+
+/** Append one row to the `logs` tab. Best-effort and fully swallowed: a logging
+ *  failure must never affect the request that triggered it. severity is one of
+ *  'ERROR' | 'WARNING' | 'INFO'. */
+function logEvent_(severity, action, message, email) {
+  try {
+    if (!ensureLogsTab_()) return;
+    appendRow_('logs', {
+      id: Utilities.getUuid(),
+      ts: new Date().toISOString(),
+      severity: String(severity || 'INFO').toUpperCase(),
+      action: String(action || '').slice(0, 60),
+      message: String(message == null ? '' : message).slice(0, 1000),
+      email: String(email || ''),
+    });
+  } catch (e) { /* never break the caller */ }
+}
+
 function appendRow_(name, obj) {
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -2966,6 +3023,7 @@ function inviteToGithubOrg_(links, notifyEmail) {
       return handle;
     }
     console.error('[github] invite failed for %s: HTTP %s %s', handle, code, bodyText);
+    logEvent_('WARNING', 'github', 'org invite failed for ' + handle + ': HTTP ' + code, notifyEmail);
     return '';
   } catch (err) {
     console.error('inviteToGithubOrg_ failed: ' + ((err && err.stack) || err));
