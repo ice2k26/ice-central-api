@@ -2184,7 +2184,7 @@ function readRegistry_(tab, noCache) {
     }
   }
   var headers = REGISTRY_TABS[tab];
-  var resp = Sheets.Spreadsheets.Values.get(registryId_(), tab + '!A2:' + colLetter_(headers.length));
+  var resp = sheetsValuesGet_(registryId_(), tab + '!A2:' + colLetter_(headers.length));
   var values = (resp && resp.values) || [];
   var rows = [];
   for (var r = 0; r < values.length; r++) {
@@ -2240,7 +2240,7 @@ function updateRegistryRowByKey_(tab, keyVal, patch) {
  *  (dbId_/uploadsFolderId_) — LockService re-entrancy is undefined. */
 function updateRegistryRowUnlocked_(tab, keyVal, patch) {
   var headers = REGISTRY_TABS[tab];
-  var resp = Sheets.Spreadsheets.Values.get(registryId_(), tab + '!A2:A');
+  var resp = sheetsValuesGet_(registryId_(), tab + '!A2:A');
   var keys = (resp && resp.values) || [];
   var rowIdx = -1;
   for (var i = 0; i < keys.length; i++) {
@@ -2248,7 +2248,7 @@ function updateRegistryRowUnlocked_(tab, keyVal, patch) {
   }
   if (rowIdx === -1) return false;
   var range = tab + '!A' + rowIdx + ':' + colLetter_(headers.length) + rowIdx;
-  var cur = ((Sheets.Spreadsheets.Values.get(registryId_(), range) || {}).values || [[]])[0] || [];
+  var cur = ((sheetsValuesGet_(registryId_(), range) || {}).values || [[]])[0] || [];
   var merged = headers.map(function (h, c) {
     return patch[h] !== undefined ? patch[h] : (cur[c] !== undefined ? cur[c] : '');
   });
@@ -2479,6 +2479,29 @@ function tableRange_(name) {
 }
 
 /** Read a table as array of objects. Cached unless noCache. */
+/** Sheets Values.get with a few retries on TRANSIENT failures. The Sheets API
+ *  intermittently returns "Empty response", "Internal error", DEADLINE_EXCEEDED
+ *  or a 5xx/rate-limit — one of those shouldn't fail a whole request (every
+ *  action reads the registry via getProject_). Permanent errors (bad range,
+ *  no permission, not found) are rethrown immediately — retrying won't help. */
+function sheetsValuesGet_(spreadsheetId, range) {
+  var api = Sheets.Spreadsheets.Values; // aliased so the retry wrapper isn't self-replaced
+  var lastErr = null;
+  for (var attempt = 0; attempt < 3; attempt++) {
+    try {
+      return api.get(spreadsheetId, range);
+    } catch (err) {
+      var msg = String((err && err.message) || err);
+      if (!/Empty response|Internal error|INTERNAL|unavailable|DEADLINE|rate limit|Rate Limit|Quota exceeded|backendError|timed out|try again|too many times/i.test(msg)) {
+        throw err; // permanent — don't waste time retrying
+      }
+      lastErr = err;
+      Utilities.sleep(400 * (attempt + 1)); // 0.4s, 0.8s
+    }
+  }
+  throw lastErr;
+}
+
 function readTable_(name, noCache) {
   var cache = CacheService.getScriptCache();
   if (!noCache) {
@@ -2488,7 +2511,7 @@ function readTable_(name, noCache) {
     }
   }
   var headers = TABLES[name];
-  var resp = Sheets.Spreadsheets.Values.get(dbId_(), tableRange_(name));
+  var resp = sheetsValuesGet_(dbId_(), tableRange_(name));
   var values = (resp && resp.values) || [];
   var rows = [];
   for (var r = 0; r < values.length; r++) {
@@ -2528,7 +2551,7 @@ function appendRow_(name, obj) {
 
 /** 1-based sheet row index for an id (header = row 1), or -1. */
 function findRowIndexById_(name, id) {
-  var resp = Sheets.Spreadsheets.Values.get(dbId_(), name + '!A2:A');
+  var resp = sheetsValuesGet_(dbId_(), name + '!A2:A');
   var ids = (resp && resp.values) || [];
   for (var i = 0; i < ids.length; i++) {
     if (String(ids[i][0]) === String(id)) return i + 2;
@@ -2544,7 +2567,7 @@ function updateRowById_(name, id, patch) {
     var rowIdx = findRowIndexById_(name, id);
     if (rowIdx === -1) throw new Error('Row not found in ' + name + ': ' + id);
     var range = name + '!A' + rowIdx + ':' + colLetter_(headers.length) + rowIdx;
-    var resp = Sheets.Spreadsheets.Values.get(dbId_(), range);
+    var resp = sheetsValuesGet_(dbId_(), range);
     var row = ((resp && resp.values) || [[]])[0] || [];
     var merged = headers.map(function (h, i) {
       return patch[h] !== undefined ? patch[h] : (row[i] !== undefined ? row[i] : '');
@@ -2595,7 +2618,7 @@ function markMessagesRead_(ids) {
   lock.waitLock(30000);
   try {
     var readCol = colLetter_(TABLES.messages.indexOf('read') + 1);
-    var resp = Sheets.Spreadsheets.Values.get(dbId_(), 'messages!A2:A');
+    var resp = sheetsValuesGet_(dbId_(), 'messages!A2:A');
     var rows = (resp && resp.values) || [];
     var data = [];
     for (var i = 0; i < rows.length; i++) {
@@ -2620,7 +2643,7 @@ function readOptions_() {
     try { return JSON.parse(hit); } catch (e) { /* refetch */ }
   }
   gid_('options'); // ensure the tab exists (creates it with the header row)
-  var resp = Sheets.Spreadsheets.Values.get(dbId_(), 'options!A2:B');
+  var resp = sheetsValuesGet_(dbId_(), 'options!A2:B');
   var values = (resp && resp.values) || [];
   if (!values.length) {
     var rows = [];
@@ -2934,7 +2957,15 @@ function inviteToGithubOrg_(links, notifyEmail) {
       console.log('[github] %s → org %s (state=%s)', handle, org, body.state || '?');
       return handle;
     }
-    console.error('[github] invite failed for %s: HTTP %s %s', handle, code, resp.getContentText());
+    var bodyText = resp.getContentText() || '';
+    // Already in the org at a HIGHER role (admin/owner): PUT role=member is
+    // refused with 403 "cannot demote". They're already a member, so this is a
+    // success — return the handle so we mark it done and don't retry every edit.
+    if (code === 403 && /demote/i.test(bodyText)) {
+      console.log('[github] %s is already an org admin/owner — treated as member', handle);
+      return handle;
+    }
+    console.error('[github] invite failed for %s: HTTP %s %s', handle, code, bodyText);
     return '';
   } catch (err) {
     console.error('inviteToGithubOrg_ failed: ' + ((err && err.stack) || err));
