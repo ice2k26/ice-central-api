@@ -912,8 +912,10 @@ var ACTIONS = {
     // GitHub org: invite the person to the designthinking-lk org as a plain
     // member if their profile card carries a GitHub handle (and it isn't
     // whitelisted). Guarded — never blocks registration; stores the handle so
-    // we don't re-invite on later profile edits. Catalysts (guests) are skipped.
-    user.githubInvited = isCatalyst ? '' : inviteToGithubOrg_(user.links, ctx.email);
+    // we don't re-invite on later profile edits. Catalysts (guests) aren't
+    // REQUIRED to give a handle, but if they do, they're added like everyone
+    // else (inviteToGithubOrg_ no-ops when there's no handle).
+    user.githubInvited = inviteToGithubOrg_(user.links, ctx.email);
     appendRow_('users', user);
     upsertDirectory_(ctx.email, {
       workEmail: workEmail,
