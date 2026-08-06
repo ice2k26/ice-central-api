@@ -990,9 +990,13 @@ var ACTIONS = {
     if (!/^image\//.test(mime)) return { ok: false, error: 'validation', message: 'Only images allowed.' };
     var bytes = Utilities.base64Decode(b64);
     if (bytes.length > MAX_UPLOAD_BYTES) return { ok: false, error: 'validation', message: 'Image must be under 5 MB.' };
+    // Lightweight breadcrumb (console only — no sheet write, no latency) so a
+    // slow/timed-out upload is attributable in Cloud Logging.
+    console.log('[upload_image] start: %s bytes, %s, user=%s', bytes.length, mime, ctx.email || '(new)');
     var name = (clean_(params.filename, 80) || 'upload') + '-' + Date.now();
     var blob = Utilities.newBlob(bytes, mime, name);
     var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
+    console.log('[upload_image] done: fileId=%s', file.id);
     Drive.Permissions.create({ role: 'reader', type: 'anyone' }, file.id);
     return { url: 'https://lh3.googleusercontent.com/d/' + file.id, fileId: file.id };
   },
@@ -1010,9 +1014,11 @@ var ACTIONS = {
     if (!/^video\//.test(mime)) return { ok: false, error: 'validation', message: 'Only video files are allowed.' };
     var bytes = Utilities.base64Decode(b64);
     if (bytes.length > MAX_VIDEO_BYTES) return { ok: false, error: 'validation', message: 'Video must be under 32 MB.' };
+    console.log('[upload_video] start: %s bytes, %s, user=%s', bytes.length, mime, ctx.email || '(new)');
     var name = 'intro-' + (clean_(params.filename, 60) || 'video') + '-' + Date.now();
     var blob = Utilities.newBlob(bytes, mime, name);
     var file = Drive.Files.create({ name: name, parents: [uploadsFolderId_()] }, blob);
+    console.log('[upload_video] done: fileId=%s', file.id);
     Drive.Permissions.create({ role: 'reader', type: 'anyone' }, file.id);
     var url = 'https://lh3.googleusercontent.com/d/' + file.id;
     // For an existing member, persist the clip onto their row right away so it
