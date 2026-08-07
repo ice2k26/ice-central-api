@@ -98,13 +98,34 @@ function pageShell_(title, inner) {
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<title>' + escapeHtml_(title) + '</title>' +
     '<style>' +
-    ':root{--accent:#6100FF;--bg:#FFFFFF;--text:#0E0F11;--text-body:#5E6875;--text-muted:#838D95}' +
-    '@media(prefers-color-scheme:dark){:root{--accent:#00D7EE;--bg:#121316;--text:#F2F4F7;--text-body:#B7BEC8;--text-muted:#8A939D}}' +
+    ':root{--accent:#6100FF;--bg:#FFFFFF;--text:#0E0F11;--text-body:#5E6875;--text-muted:#838D95;' +
+    '--aurora-1:rgba(97,0,255,.28);--aurora-2:rgba(0,170,255,.22);--aurora-3:rgba(255,80,180,.20)}' +
+    '@media(prefers-color-scheme:dark){:root{--accent:#00D7EE;--bg:#121316;--text:#F2F4F7;--text-body:#B7BEC8;--text-muted:#8A939D;' +
+    '--aurora-1:rgba(140,70,255,.42);--aurora-2:rgba(0,200,255,.30);--aurora-3:rgba(255,60,170,.30)}}' +
     'html,body{height:100%}' +
     'body{margin:0;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--text);' +
+    'position:relative;overflow:hidden;' +
     'font-family:"neue-haas-grotesk-text","Helvetica Neue",-apple-system,"Segoe UI",sans-serif;' +
     '-webkit-font-smoothing:antialiased;text-align:center}' +
-    'main{padding:24px;max-width:26rem}' +
+    'main{padding:24px;max-width:26rem;position:relative;z-index:1}' +
+    /* Ambient aurora — same recipe/palette as the frontend (web/css/app.css):
+       three blurred radial blobs drifting behind the card. Palette is theme-aware
+       above, so dark mode gets the brighter "dark" aurora. */
+    '.aurora{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}' +
+    '.aurora span{position:absolute;border-radius:50%;filter:blur(70px);opacity:.55;will-change:transform}' +
+    '.aurora span:nth-child(1){width:46vw;height:46vw;left:-6vw;top:-12vh;' +
+    'background:radial-gradient(circle at 30% 30%,var(--aurora-1),transparent 70%);animation:aurora-1 34s ease-in-out infinite}' +
+    '.aurora span:nth-child(2){width:42vw;height:42vw;right:-8vw;top:6vh;' +
+    'background:radial-gradient(circle at 60% 40%,var(--aurora-2),transparent 70%);animation:aurora-2 40s ease-in-out infinite}' +
+    '.aurora span:nth-child(3){width:52vw;height:52vw;left:22vw;bottom:-24vh;' +
+    'background:radial-gradient(circle at 50% 50%,var(--aurora-3),transparent 70%);animation:aurora-3 46s ease-in-out infinite}' +
+    '@keyframes aurora-1{0%{transform:translate(0,0) scale(1)}25%{transform:translate(7vw,6vh) scale(1.1)}' +
+    '50%{transform:translate(12vw,-2vh) scale(1.18)}75%{transform:translate(4vw,8vh) scale(1.06)}100%{transform:translate(0,0) scale(1)}}' +
+    '@keyframes aurora-2{0%{transform:translate(0,0) scale(1.1)}25%{transform:translate(-6vw,7vh) scale(1)}' +
+    '50%{transform:translate(-10vw,2vh) scale(.92)}75%{transform:translate(-3vw,-6vh) scale(1.04)}100%{transform:translate(0,0) scale(1.1)}}' +
+    '@keyframes aurora-3{0%{transform:translate(0,0) scale(1)}25%{transform:translate(8vw,-6vh) scale(1.12)}' +
+    '50%{transform:translate(2vw,-10vh) scale(1.2)}75%{transform:translate(-6vw,-3vh) scale(1.08)}100%{transform:translate(0,0) scale(1)}}' +
+    '@media(prefers-reduced-motion:reduce){.aurora span{animation:none}}' +
     '.mark{width:56px;height:56px;border-radius:14px;margin-bottom:20px}' +
     'h1{font-family:"neue-haas-grotesk-display","Helvetica Neue",-apple-system,"Segoe UI",sans-serif;' +
     'font-size:1.35rem;font-weight:600;letter-spacing:-0.01em;margin:0 0 6px}' +
@@ -122,7 +143,9 @@ function pageShell_(title, inner) {
     '.code-form input:focus{border-color:var(--accent)}' +
     '.code-form button{flex:none;padding:9px 16px;border-radius:999px;border:1px solid var(--accent);' +
     'background:transparent;color:var(--accent);font-size:14px;font-weight:600;cursor:pointer}' +
-    '</style></head><body><main>' +
+    '</style></head><body>' +
+    '<div class="aurora" aria-hidden="true"><span></span><span></span><span></span></div>' +
+    '<main>' +
     '<svg class="mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="ICE">' +
     '<defs><linearGradient id="g" x1="1" y1="0" x2="0" y2="1">' +
     '<stop offset="0" stop-color="#00D7EE"/><stop offset="1" stop-color="#6100FF"/>' +
