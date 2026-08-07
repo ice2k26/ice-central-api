@@ -629,7 +629,9 @@ function walletAddMessage_(objectId, token, header, body) {
   // card silently with no push.
   var code = resp.getResponseCode();
   if (code !== 200) {
-    Logger.log('addMessage %s → %s %s', objectId, code, resp.getContentText().slice(0, 200));
+    // console.* (not Logger.log) so it lands in Cloud Logging where it's
+    // queryable — `gcloud logging read 'textPayload:"addMessage failed"'`.
+    console.warn('addMessage failed ' + objectId + ' → ' + code + ' ' + resp.getContentText().slice(0, 200));
     return false;
   }
   return true;
