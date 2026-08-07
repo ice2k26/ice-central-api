@@ -521,10 +521,10 @@ function walletRefreshTick() {
       patched++;
 
       // Push a notification only when the announcement text actually changes.
+      // Count only messages Google actually accepted (200) — see walletAddMessage_.
       var prevNote = walletModBody_(curMods, 'note');
       if (fields.announcement && fields.announcement !== prevNote) {
-        walletAddMessage_(obj.id, token, PROJ.name || 'ICE 2026', fields.announcement);
-        pushed++;
+        if (walletAddMessage_(obj.id, token, PROJ.name || 'ICE 2026', fields.announcement)) pushed++;
       }
     } catch (err) {
       Logger.log('refresh %s failed: %s', obj.id, err && err.stack || err);
@@ -615,11 +615,24 @@ function walletAddMessage_(objectId, token, header, body) {
       messageType: 'TEXT_AND_NOTIFY'
     }
   };
-  UrlFetchApp.fetch(
+  var resp = UrlFetchApp.fetch(
     'https://walletobjects.googleapis.com/walletobjects/v1/genericObject/' + objectId + '/addMessage',
     { method: 'post', headers: { Authorization: 'Bearer ' + token },
       contentType: 'application/json', payload: JSON.stringify(msg), muteHttpExceptions: true }
   );
+  // Surface failures instead of swallowing them — a non-200 here (bad request,
+  // auth, or Google silently throttling) previously still counted as "pushed",
+  // which is why the admin history could show delivery counts nobody received.
+  // NOTE: even a 200 only means Google *accepted* the message; the actual
+  // tray/lock-screen notification is still subject to Google's cap of ~3
+  // TEXT_AND_NOTIFY per pass per 24h — beyond that the message lands on the
+  // card silently with no push.
+  var code = resp.getResponseCode();
+  if (code !== 200) {
+    Logger.log('addMessage %s → %s %s', objectId, code, resp.getContentText().slice(0, 200));
+    return false;
+  }
+  return true;
 }
 
 // ── One-off: install the 5-minute refresh trigger (run once from editor) ──

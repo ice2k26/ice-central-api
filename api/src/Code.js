@@ -23,6 +23,27 @@
  * sheets — an existing spreadsheet can never be linked in.
  */
 
+/**
+ * Re-authorize the script. Run this ZERO-ARG function from the Apps Script
+ * editor (Run button) after the owner's OAuth grant was revoked, or when the
+ * scope list changed. It touches every scope the manifest declares so the
+ * consent dialog re-prompts for the FULL set, restoring the deployed web app
+ * and all installable triggers. Read-only — makes no changes.
+ */
+function reauth() {
+  // Drive (full drive scope) + Sheets/Drive advanced services
+  DriveApp.getRootFolder().getName();
+  // Admin Directory
+  try { AdminDirectory.Users.list({ customer: 'my_customer', maxResults: 1 }); } catch (e) {}
+  // Calendar
+  try { CalendarApp.getDefaultCalendar().getName(); } catch (e) {}
+  // External request
+  try { UrlFetchApp.fetch('https://www.googleapis.com/discovery/v1/apis', { muteHttpExceptions: true }); } catch (e) {}
+  // Send mail + script token
+  ScriptApp.getOAuthToken();
+  Logger.log('reauth: OK — grant restored');
+}
+
 var ADMIN_EMAILS = ['sankha@ahlab.org'];
 
 var DEFAULT_PROJECT = 'ice2026';
