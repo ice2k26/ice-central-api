@@ -77,15 +77,12 @@ function doGet(e) {
 
   // The sandboxed iframe blocks scripted top-level navigation, so a
   // user-gesture link (target=_top) is the only reliable way back.
-  var page = HtmlService.createHtmlOutput(pageShell_(
-    'Signing in…',
+  return htmlPage_('ICE — Signing in',
     '<h1>You&#39;re signed in</h1>' +
     '<p class="body"><b>' + escapeHtml_(email) + '</b></p>' +
     '<a class="btn" href="' + target.replace(/"/g, '&quot;') + '" target="_top">Continue</a>' +
     '<p class="muted"><a href="' + switchUrl.replace(/"/g, '&quot;') + '" target="_top">Use a different account</a></p>'
-  ));
-  page.setTitle('ICE — Signing in');
-  return page;
+  );
 }
 
 /**
@@ -143,6 +140,11 @@ function pageShell_(title, inner) {
     '.code-form input:focus{border-color:var(--accent)}' +
     '.code-form button{flex:none;padding:9px 16px;border-radius:999px;border:1px solid var(--accent);' +
     'background:transparent;color:var(--accent);font-size:14px;font-weight:600;cursor:pointer}' +
+    /* phones: larger type + tap targets */
+    '@media(max-width:480px){main{padding:24px 20px}h1{font-size:1.6rem}p{font-size:1.05rem}' +
+    '.muted{font-size:0.95rem}.mark{width:64px;height:64px;margin-bottom:22px}' +
+    '.btn{margin-top:24px;padding:15px 34px;font-size:16.5px}' +
+    '.code-form input,.code-form button{padding:13px 16px;font-size:16px}}' +
     '</style></head><body>' +
     '<div class="aurora" aria-hidden="true"><span></span><span></span><span></span></div>' +
     '<main>' +
@@ -220,8 +222,7 @@ function renderNotInvited_(email, redirect) {
   var self = canonicalExecUrl_();
   var switchUrl = 'https://accounts.google.com/AccountChooser?continue=' +
     encodeURIComponent(self + '?redirect=' + encodeURIComponent(redirect));
-  var page = HtmlService.createHtmlOutput(pageShell_(
-    'Not invited',
+  return htmlPage_('ICE — Not invited',
     '<h1>This account isn&#39;t invited</h1>' +
     '<p class="body">You&#39;re signed in as <b>' + escapeHtml_(email) + '</b>.</p>' +
     '<p class="muted">This workshop is invite-only. Sign in with the Google account your invitation was sent to, or ask the organizers to invite you.</p>' +
@@ -233,9 +234,7 @@ function renderNotInvited_(email, redirect) {
     '<input type="text" name="code" placeholder="Have an access code?" autocomplete="off" spellcheck="false">' +
     '<button type="submit">Continue</button>' +
     '</form>'
-  ));
-  page.setTitle('ICE — Not invited');
-  return page;
+  );
 }
 
 /** token = base64url("email|expiryMillis") + "." + base64url(hmac) */
@@ -252,11 +251,18 @@ function b64url_(bytes) {
   return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '');
 }
 
+// Build the HtmlOutput. HtmlService sandboxes the page in an iframe and STRIPS
+// any <meta> from the HTML string, so the viewport must be attached via
+// addMetaTag — otherwise phones render the page at desktop width and scale it
+// down (tiny text + button). setTitle keeps the browser tab label.
+function htmlPage_(title, inner) {
+  return HtmlService.createHtmlOutput(pageShell_(title, inner))
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setTitle(title);
+}
+
 function renderMessage_(title, body) {
-  return HtmlService.createHtmlOutput(pageShell_(
-    title,
-    '<h1>' + escapeHtml_(title) + '</h1><p class="body">' + body + '</p>'
-  ));
+  return htmlPage_(title, '<h1>' + escapeHtml_(title) + '</h1><p class="body">' + body + '</p>');
 }
 
 function escapeHtml_(s) {
