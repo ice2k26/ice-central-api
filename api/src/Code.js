@@ -3302,3 +3302,71 @@ function checkWorkspaceAccess() {
     return 'FAILED — ' + ((err && err.message) || err) + ' (check super-admin rights and that ' + WORKSPACE_DOMAIN + ' is a verified domain).';
   }
 }
+
+// -------------------------------------------------- TEMP: manual onboard (remove after use)
+// One-off for onboarding a person who ALREADY owns a @designthinking.lk account
+// created by hand BEFORE this platform existed — so their workspace login IS their
+// identity. There is no personal email and no registration card, and (critically)
+// NO duplicate account is minted: the normal register flow would fall through to
+// provisionWorkspaceAccount_ and create a SECOND @designthinking.lk account, because
+// it has never seen this address in the directory. This writes the users + directory
+// rows directly, keyed on the existing address as BOTH the primary email AND the
+// workEmail, so canonicalEmail_ resolves their sign-in to this row and every future
+// registration sees the directory entry and skips minting.
+//
+// The Apps Script editor can't pass arguments, so edit the constants below, then Run
+// onboardExistingWorkspaceMember() in Code.js. Idempotent — a re-run detects the
+// existing users row and no-ops. Delete this block once the person is onboarded.
+function onboardExistingWorkspaceMember() {
+  var EMAIL = 'asitha@designthinking.lk'; // the existing workspace account = their login = their identity
+  var NAME  = 'Asitha';                   // display name — set to the FULL name before running
+  var ROLE  = 'catalyst';                 // participant | mentor | admin | catalyst
+
+  PROJ = getProject_(DEFAULT_PROJECT, true);
+  if (!PROJ) throw new Error('Default project missing from registry: ' + DEFAULT_PROJECT);
+
+  var email = String(EMAIL).toLowerCase();
+  if (findUserByEmail_(email)) {
+    console.log('Already onboarded — a users row exists for ' + email + '. No change.');
+    return;
+  }
+
+  // Informational: confirm the workspace account actually exists (guarded — never blocks).
+  var exists = false;
+  try { AdminDirectory.Users.get(email); exists = true; } catch (e) {}
+  console.log('Workspace account ' + email + (exists ? ' found via Admin SDK.' : ' NOT found via Admin SDK — continuing anyway.'));
+
+  var now = new Date().toISOString();
+  var user = {
+    id: Utilities.getUuid(),
+    email: email,
+    name: NAME,
+    image: '',
+    bio: '',
+    skills: jsonArr_([], 30, 40),
+    affiliation: '',
+    expertise: '',
+    gender: '',
+    links: jsonArr_([], 10, 300),
+    video: '',
+    videoName: '',
+    role: ROLE,
+    createdAt: now,
+    updatedAt: now,
+    workEmail: email,  // their pre-existing account IS their workshop handle
+    githubInvited: '', // catalysts are GitHub-exempt; a builder can add a handle in-app later
+  };
+  appendRow_('users', user);
+
+  // Cross-project directory: primary email == workEmail (the same existing account),
+  // so both a future re-invite and a workEmail sign-in resolve here and never mint.
+  upsertDirectory_(email, {
+    workEmail: email,
+    name: NAME,
+    lastProjectId: PROJ.id,
+    profile: JSON.stringify(profileSnapshot_(user)),
+  });
+
+  logEvent_('INFO', 'manual_onboard', NAME + ' onboarded as ' + ROLE + ' (pre-existing workspace account)', email);
+  console.log('Onboarded ' + NAME + ' <' + email + '> as ' + ROLE + ' into ' + PROJ.id + '. They can sign in now.');
+}
