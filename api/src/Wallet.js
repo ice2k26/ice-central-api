@@ -504,7 +504,10 @@ function walletRefreshTick() {
       var curName = (obj.header && obj.header.defaultValue && obj.header.defaultValue.value) || '';
       var curRole = (obj.subheader && obj.subheader.defaultValue && obj.subheader.defaultValue.value) || '';
       if (JSON.stringify(curMods) === JSON.stringify(freshMods) && curName === fields.name &&
-          curRole === (fields.role || 'Member')) { skipped++; continue; }
+          curRole === (fields.role || 'Member')) {
+        console.log('walletObj uid=' + parsed.uid + ' UNCHANGED note=' + JSON.stringify(walletModBody_(curMods, 'note')));
+        skipped++; continue;
+      }
 
       var patch = {
         header:    { defaultValue: { language: 'en-US', value: fields.name || user.name } },
@@ -517,15 +520,20 @@ function walletRefreshTick() {
           contentType: 'application/json', payload: JSON.stringify(patch), muteHttpExceptions: true }
       );
       var code = resp.getResponseCode();
-      if (code !== 200) { Logger.log('PATCH %s → %s %s', obj.id, code, resp.getContentText().slice(0, 150)); continue; }
+      if (code !== 200) { console.warn('PATCH failed ' + obj.id + ' → ' + code + ' ' + resp.getContentText().slice(0, 150)); continue; }
       patched++;
 
       // Push a notification only when the announcement text actually changes.
       // Count only messages Google actually accepted (200) — see walletAddMessage_.
       var prevNote = walletModBody_(curMods, 'note');
+      var didPush = false;
       if (fields.announcement && fields.announcement !== prevNote) {
-        if (walletAddMessage_(obj.id, token, PROJ.name || 'ICE 2026', fields.announcement)) pushed++;
+        didPush = walletAddMessage_(obj.id, token, PROJ.name || 'ICE 2026', fields.announcement);
+        if (didPush) pushed++;
       }
+      // TEMP DIAGNOSTIC: per-object trace so we can see exactly what each pass got.
+      console.log('walletObj uid=' + parsed.uid + ' patched=200 prevNote=' + JSON.stringify(prevNote) +
+        ' newNote=' + JSON.stringify(fields.announcement) + ' pushed=' + didPush);
     } catch (err) {
       Logger.log('refresh %s failed: %s', obj.id, err && err.stack || err);
     }

@@ -1242,7 +1242,29 @@ var ACTIONS = {
    *  (not a delta). The wallet refresh trigger picks the change up on its next
    *  tick and updates every installed pass for that team's members. */
   admin_set_score: function (params, ctx) {
-    var team = rowById_('teams', params.teamId);
+    var team = params.teamId ? rowById_('teams', params.teamId) : null;
+    // Allow addressing a team by its A–F letter and create the row on first
+    // score (mirrors admin_assign_team), so scores can be set on the Team board
+    // before anyone is assigned — all six teams show a score input.
+    if (!team && params.team) {
+      var letter = clean_(params.team, 1).toUpperCase();
+      if (TEAM_LETTERS.indexOf(letter) === -1) {
+        return { ok: false, error: 'validation', message: 'Team must be one of ' + TEAM_LETTERS.join(', ') + '.' };
+      }
+      var wanted = ('team ' + letter).toLowerCase();
+      readTable_('teams', true).forEach(function (t) {
+        if (String(t.name || '').trim().toLowerCase() === wanted) team = t;
+      });
+      if (!team) {
+        var now = new Date().toISOString();
+        team = {
+          id: Utilities.getUuid(), name: 'Team ' + letter, description: '', coverImage: '',
+          lookingFor: '', creatorId: ctx.user ? ctx.user.id : '', members: '[]',
+          createdAt: now, updatedAt: now,
+        };
+        appendRow_('teams', team);
+      }
+    }
     if (!team) return { ok: false, error: 'notfound', message: 'Team not found.' };
     var score = Math.round(Number(params.score));
     if (!isFinite(score)) return { ok: false, error: 'validation', message: 'Score must be a number.' };
