@@ -234,8 +234,13 @@ function handle_(params) {
     return json_(result);
   } catch (err) {
     console.error('handle_ failed', err && err.stack || err);
-    logEvent_('ERROR', String(params && params.action || ''), String(err && err.message || err));
-    return json_({ ok: false, error: 'server', message: String(err && err.message || err) });
+    // A retry-exhausted transient Google outage (Sheets 5xx/unavailable) is not
+    // our bug and self-heals — record it as WARNING so it doesn't trip error
+    // alerting, and tell the client it's safe to retry.
+    var transient = !!(err && err.__transient);
+    logEvent_(transient ? 'WARNING' : 'ERROR', String(params && params.action || ''), String(err && err.message || err));
+    return json_({ ok: false, error: transient ? 'unavailable' : 'server', retryable: transient,
+      message: transient ? 'A temporary Google service error occurred. Please try again.' : String(err && err.message || err) });
   }
 }
 
@@ -2554,10 +2559,11 @@ function tableRange_(name) {
  *  or a 5xx/rate-limit — one of those shouldn't fail a whole request (every
  *  action reads the registry via getProject_). Permanent errors (bad range,
  *  no permission, not found) are rethrown immediately — retrying won't help. */
+var SHEETS_GET_MAX_ATTEMPTS = 4;
 function sheetsValuesGet_(spreadsheetId, range) {
   var api = Sheets.Spreadsheets.Values; // aliased so the retry wrapper isn't self-replaced
   var lastErr = null;
-  for (var attempt = 0; attempt < 3; attempt++) {
+  for (var attempt = 0; attempt < SHEETS_GET_MAX_ATTEMPTS; attempt++) {
     try {
       return api.get(spreadsheetId, range);
     } catch (err) {
@@ -2566,13 +2572,22 @@ function sheetsValuesGet_(spreadsheetId, range) {
       // errors. The latter arrive as "Response code: 502. Message: <html>…Error
       // 502 (Server Error)…" (Google's robot page) with none of the named
       // tokens, so match the 5xx status / gateway phrasings explicitly too.
+      // (Messages can be locale-translated, but the API-name/status tail stays
+      // English — e.g. "…අසාර්ථක විය: Internal error encountered.")
       if (!/Empty response|Internal error|INTERNAL|unavailable|DEADLINE|rate limit|Rate Limit|Quota exceeded|backendError|timed out|try again|too many times|Response code: 5\d\d|Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out/i.test(msg)) {
         throw err; // permanent — don't waste time retrying
       }
       lastErr = err;
-      Utilities.sleep(400 * (attempt + 1)); // 0.4s, 0.8s
+      // Exponential backoff with jitter: ~0.4s, 0.8s, 1.6s (last attempt: no
+      // sleep). Rides out short Sheets blips without stalling page-load reads.
+      if (attempt < SHEETS_GET_MAX_ATTEMPTS - 1) {
+        Utilities.sleep(400 * Math.pow(2, attempt) + Math.floor(Math.random() * 200));
+      }
     }
   }
+  // Exhausted retries on a transient Google-side outage — flag it so the
+  // dispatcher logs a WARNING (self-healing, not our bug), not a false ERROR.
+  if (lastErr) { try { lastErr.__transient = true; } catch (e) {} }
   throw lastErr;
 }
 
