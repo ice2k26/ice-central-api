@@ -2562,7 +2562,11 @@ function sheetsValuesGet_(spreadsheetId, range) {
       return api.get(spreadsheetId, range);
     } catch (err) {
       var msg = String((err && err.message) || err);
-      if (!/Empty response|Internal error|INTERNAL|unavailable|DEADLINE|rate limit|Rate Limit|Quota exceeded|backendError|timed out|try again|too many times/i.test(msg)) {
+      // Transient signals: named backend errors AND raw HTTP gateway/server
+      // errors. The latter arrive as "Response code: 502. Message: <html>…Error
+      // 502 (Server Error)…" (Google's robot page) with none of the named
+      // tokens, so match the 5xx status / gateway phrasings explicitly too.
+      if (!/Empty response|Internal error|INTERNAL|unavailable|DEADLINE|rate limit|Rate Limit|Quota exceeded|backendError|timed out|try again|too many times|Response code: 5\d\d|Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out/i.test(msg)) {
         throw err; // permanent — don't waste time retrying
       }
       lastErr = err;
