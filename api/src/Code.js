@@ -3389,3 +3389,34 @@ function onboardExistingWorkspaceMember() {
   logEvent_('INFO', 'manual_onboard', NAME + ' onboarded as ' + ROLE + ' (pre-existing workspace account)', email);
   console.log('Onboarded ' + NAME + ' <' + email + '> as ' + ROLE + ' into ' + PROJ.id + '. They can sign in now.');
 }
+
+// -------------------------------------------------- TEMP: remove one member (remove after use)
+// One-off cleanup for a person who can no longer take part — here Muftee, a
+// catalyst who is dropping out of the workshop. The Apps Script editor can't
+// pass arguments, so the target email is a constant; edit it if reusing, then
+// Run removeMuftee() in Code.js. Idempotent — a re-run finds no row and no-ops.
+//
+// This delegates to the same admin_delete_user handler the Admin UI uses, so
+// the offboard is complete and consistent: profile row + Drive uploads, team
+// membership (catalysts have none), authored messages/posts/links, and the
+// invite/allowlist entry are all removed, while the cross-project directory
+// email<->workEmail pool is kept (a future re-invite would reuse it). Delete
+// this block once Muftee is removed.
+function removeMuftee() {
+  var EMAIL = 'muftee@ahlab.org'; // the personal email the person registered under
+
+  PROJ = getProject_(DEFAULT_PROJECT, true);
+  if (!PROJ) throw new Error('Default project missing from registry: ' + DEFAULT_PROJECT);
+
+  var email = String(EMAIL).toLowerCase();
+  var user = findUserByEmail_(email);
+  if (!user) {
+    console.log('No users row for ' + email + ' in ' + PROJ.id + ' — nothing to remove (already gone?).');
+    return;
+  }
+
+  console.log('Removing ' + (user.name || '(no name)') + ' <' + email + '> [role=' + user.role + '] from ' + PROJ.id + '…');
+  ACTIONS.admin_delete_user({ userId: user.id }, {});
+  logEvent_('INFO', 'manual_remove', (user.name || email) + ' removed (dropped out of workshop)', email);
+  console.log('Removed ' + email + '. Directory email<->workEmail pool kept; invite/allowlist entry cleared.');
+}
