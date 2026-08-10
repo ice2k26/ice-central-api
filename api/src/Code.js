@@ -605,6 +605,7 @@ var ACTIONS = {
             endLocal: fmt(ev.getEndTime()),
             location: ev.getLocation() || '',
             allDay: ev.isAllDayEvent(),
+            color: ev.getColor(), // Google colorId ('1'–'11'), '' if default — drives category tint
           };
         }),
       };
