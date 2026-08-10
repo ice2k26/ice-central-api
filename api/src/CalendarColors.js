@@ -57,8 +57,8 @@ function categorizeIce2026_(title) {
   // Finale Event — closing block
   if (/finale|vip|certificate|clean up|debrief/.test(t)) return 'finale';
 
-  // Refreshment — breaks & meals
-  if (/tea|lunch|dinner|refreshment/.test(t)) return 'refreshment';
+  // Refreshment — breaks & meals. \btea\b so it doesn't match inside "team".
+  if (/\btea\b|lunch|dinner|refreshment/.test(t)) return 'refreshment';
 
   // Invited Talk
   if (/invited talk/.test(t)) return 'talk';
