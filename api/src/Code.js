@@ -628,15 +628,22 @@ var ACTIONS = {
     var myTeamId = myTeam ? myTeam.id : '';
     var tools = readTable_('tools').filter(function (r) {
       if (r.scope === 'global') return true;
-      return r.scope === 'team' && myTeamId && r.teamId === myTeamId;
+      if (r.scope !== 'team') return false;
+      if (ctx.isAdmin) return true;            // admins see (and manage) every team's tools
+      return myTeamId && r.teamId === myTeamId;
     }).map(function (r) { return publicTool_(r, ctx, myTeamId); });
     var isMentorAdmin = !!(ctx.isAdmin || (ctx.user && hasRole_(ctx.user, 'mentor')));
-    return {
+    var out = {
       tools: tools,
       canAddGlobal: isMentorAdmin,
-      canAddTeam: !!myTeamId,     // must be on a team to add a team tool
+      canAddTeam: !!(ctx.isAdmin || myTeamId),  // admins can add for any team; others must be on one
       myTeam: myTeam ? { id: myTeam.id, name: myTeam.name } : null,
     };
+    // Admins pick which team a team tool belongs to, so hand them the full list.
+    if (ctx.isAdmin) {
+      out.allTeams = readTable_('teams').map(function (t) { return { id: t.id, name: t.name }; });
+    }
+    return out;
   },
 
   tool_add: function (params, ctx) {
@@ -649,9 +656,16 @@ var ACTIONS = {
     }
     var teamId = '';
     if (scope === 'team') {
-      var myTeam = teamOfUser_(ctx.user.id);
-      if (!myTeam) return { ok: false, error: 'noteam', message: 'Join a team first to add a team tool.' };
-      teamId = myTeam.id;
+      // Admins may target any team; everyone else is pinned to their own.
+      if (ctx.isAdmin && params.teamId) {
+        var pickTeam = rowById_('teams', String(params.teamId));
+        if (!pickTeam) return { ok: false, error: 'noteam', message: 'Team not found.' };
+        teamId = pickTeam.id;
+      } else {
+        var myTeam = teamOfUser_(ctx.user.id);
+        if (!myTeam) return { ok: false, error: 'noteam', message: 'Join a team first to add a team tool.' };
+        teamId = myTeam.id;
+      }
     }
     var fields = toolFields_(params);
     if (fields.error) return fields;
@@ -2083,8 +2097,13 @@ function toolFields_(params) {
 // see the tool — tools_list already filters to those), plus a `canManage` flag
 // so the frontend can show edit/delete without re-deriving the rules.
 function publicTool_(r, ctx, myTeamId) {
+  var teamName = '';
+  if (r.scope === 'team' && r.teamId) {
+    var tm = rowById_('teams', r.teamId);
+    teamName = tm ? tm.name : '';
+  }
   return {
-    id: r.id, scope: r.scope, teamId: r.teamId || '',
+    id: r.id, scope: r.scope, teamId: r.teamId || '', teamName: teamName,
     title: r.title, description: r.description || '', url: r.url || '', secret: r.secret || '',
     createdBy: r.createdBy, createdAt: r.createdAt, updatedAt: r.updatedAt,
     canManage: ctx ? canManageTool_(r, ctx) : false,
