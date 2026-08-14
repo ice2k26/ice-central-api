@@ -2641,6 +2641,31 @@ function githubFetch_(url, method, token, payload) {
   return UrlFetchApp.fetch(url, opts);
 }
 
+/** Create or update a file in a repo via the Contents API. Idempotent: returns
+ *  'unchanged' when the file already holds contentStr, else 'created'/'updated'.
+ *  NOTE: writing under .github/workflows/ needs the token's Workflows: write
+ *  permission (separate from Contents). */
+function githubPutFile_(cfg, repo, path, contentStr, message) {
+  var base = 'https://api.github.com/repos/' + cfg.org + '/' + repo + '/contents/' + path;
+  var get = githubFetch_(base, 'get', cfg.token);
+  var sha = null, existing = null;
+  if (get.getResponseCode() === 200) {
+    try {
+      var b = JSON.parse(get.getContentText());
+      sha = b.sha;
+      existing = Utilities.newBlob(Utilities.base64Decode(String(b.content || '').replace(/\s/g, ''))).getDataAsString();
+    } catch (e) { /* treat as absent */ }
+  }
+  if (existing !== null && existing === contentStr) return 'unchanged';
+  var payload = { message: message, content: Utilities.base64Encode(contentStr, Utilities.Charset.UTF_8) };
+  if (sha) payload.sha = sha;
+  var put = githubFetch_(base, 'put', cfg.token, payload);
+  var code = put.getResponseCode();
+  if (code === 201) return 'created';
+  if (code === 200) return 'updated';
+  throw new Error('put ' + path + ' HTTP ' + code + ' ' + (put.getContentText() || ''));
+}
+
 /** DNS-only (grey-cloud) CNAME {slug}.designthinking.lk -> designthinking-lk
  *  .github.io. Grey is REQUIRED (see the section header). Idempotent — an
  *  existing record counts as success. */
@@ -3489,6 +3514,67 @@ function bootstrapTeamWebsites(projectId) {
     out.push(status);
   }
   console.log('[site] bootstrap → ' + JSON.stringify(out, null, 2));
+  return out;
+}
+
+// GitHub Actions workflow seeded into each team repo. It enforces HTTPS on the
+// repo's own Pages site — no Apps Script scope, no PAT, using only the built-in
+// per-run github.token (permissions: pages: write). It fires when Pages rebuilds
+// (which happens right after we set a new custom domain), polls until the Let's
+// Encrypt cert is 'approved', flips https_enforced on, and re-tries hourly as a
+// backstop. This replaces the old in-API trigger so enforcement can never touch
+// the platform's OAuth grant. Kept as a JS array (NOT a template literal — the
+// ${{ }} expressions would be parsed as interpolation). Mirror edits here into
+// seedTeamSiteWorkflows()'s idempotent update path.
+var TEAM_SITE_HTTPS_WORKFLOW = [
+  'name: Enforce HTTPS on Pages',
+  'on:',
+  '  page_build:',
+  '  workflow_dispatch:',
+  '  schedule:',
+  "    - cron: '17 * * * *'",
+  'permissions:',
+  '  pages: write',
+  'jobs:',
+  '  enforce:',
+  '    runs-on: ubuntu-latest',
+  '    steps:',
+  '      - name: Enforce HTTPS once the cert is ready',
+  '        env:',
+  '          GH_TOKEN: ${{ github.token }}',
+  '          REPO: ${{ github.repository }}',
+  '        run: |',
+  '          for i in $(seq 1 30); do',
+  '            enforced=$(gh api "repos/$REPO/pages" --jq \'.https_enforced\' 2>/dev/null || echo false)',
+  '            state=$(gh api "repos/$REPO/pages" --jq \'.https_certificate.state // "none"\' 2>/dev/null || echo none)',
+  '            echo "attempt $i: cert=$state enforced=$enforced"',
+  '            [ "$enforced" = "true" ] && { echo "already enforced"; exit 0; }',
+  '            if [ "$state" = "approved" ]; then',
+  '              gh api -X PUT "repos/$REPO/pages" -F https_enforced=true && { echo "enforced"; exit 0; }',
+  '            fi',
+  '            sleep 60',
+  '          done',
+  '          echo "cert not ready after ~30 min — next trigger will retry"',
+  '',
+].join('\n');
+
+/** EDITOR-RUNNABLE: write the HTTPS-enforce GitHub Actions workflow into every
+ *  team repo (idempotent — skips repos already holding the current version).
+ *  Run once after bootstrap. REQUIRES the token to also have Workflows: write
+ *  (separate from Contents) — GitHub blocks writes under .github/workflows/
+ *  otherwise. Result per repo goes to the execution log. */
+function seedTeamSiteWorkflows() {
+  var cfg = githubSiteCfg_();
+  var out = [];
+  for (var slot = 0; slot < TEAM_LETTERS.length; slot++) {
+    var repo = githubRepoForSlot_(slot);
+    var res = { repo: repo, status: '', error: '' };
+    try {
+      res.status = githubPutFile_(cfg, repo, '.github/workflows/enforce-https.yml', TEAM_SITE_HTTPS_WORKFLOW, 'Add HTTPS-enforce workflow');
+    } catch (e) { res.error = (e && e.message) || String(e); }
+    out.push(res);
+  }
+  console.log('[site] seed workflows → ' + JSON.stringify(out, null, 2));
   return out;
 }
 
