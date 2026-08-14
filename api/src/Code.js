@@ -2719,10 +2719,6 @@ function provisionTeamSite_(slot, newSlug, oldSlug) {
   var domain = newSlug + SITE_APEX;
   createSiteDnsRecord_(newSlug);
   githubSetPagesCname_(repo, domain);
-  // HTTPS can't be enforced yet (the cert for the new domain isn't provisioned
-  // until DNS resolves). Queue it — a self-managing trigger flips it on once the
-  // cert is ready, then removes itself. See markSiteHttpsPending_/siteHttpsTick.
-  markSiteHttpsPending_(repo);
   if (oldSlug && oldSlug !== newSlug) deleteSiteDnsRecord_(oldSlug);
   return { url: 'https://' + domain, slug: newSlug };
 }
@@ -3549,68 +3545,6 @@ function enforceTeamSitesHttps() {
   return out;
 }
 
-// -------------------------------------------------- auto HTTPS enforcement
-// Enforcing HTTPS the moment a custom domain is set fails ("certificate does not
-// exist yet") — the Let's Encrypt cert isn't provisioned until DNS resolves,
-// minutes later. So provisionTeamSite_ QUEUES the repo (markSiteHttpsPending_)
-// and installs a 10-minute time trigger (siteHttpsTick). Each tick retries the
-// enforce for every queued repo, dropping ones that succeed (or give up after
-// ~3h), and deletes the trigger once the queue is empty — no perpetual polling.
-var SITE_HTTPS_PROP = 'SITE_HTTPS_PENDING';
-
-function loadHttpsPending_() {
-  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty(SITE_HTTPS_PROP) || '[]'); }
-  catch (e) { return []; }
-}
-function saveHttpsPending_(arr) {
-  PropertiesService.getScriptProperties().setProperty(SITE_HTTPS_PROP, JSON.stringify(arr || []));
-}
-
-/** Queue a repo for HTTPS enforcement and make sure the retry trigger exists.
- *  Best-effort — a missing trigger scope (before re-auth) must never break the
- *  save that called us; enforce can still be run manually meanwhile. */
-function markSiteHttpsPending_(repo) {
-  try {
-    var arr = loadHttpsPending_();
-    if (!arr.some(function (x) { return x.repo === repo; })) arr.push({ repo: repo, tries: 0 });
-    saveHttpsPending_(arr);
-    ensureHttpsTrigger_();
-  } catch (e) { console.warn('[site] queue HTTPS enforce failed for ' + repo + ': ' + (e && e.message || e)); }
-}
-
-function ensureHttpsTrigger_() {
-  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'siteHttpsTick'; });
-  if (!has) ScriptApp.newTrigger('siteHttpsTick').timeBased().everyMinutes(10).create();
-}
-function removeHttpsTrigger_() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'siteHttpsTick') ScriptApp.deleteTrigger(t);
-  });
-}
-
-/** Time-trigger handler: retry HTTPS enforcement for each queued repo. Drops a
- *  repo on success, or after ~18 tries (~3h) with a warning. Removes the trigger
- *  when nothing is left to do. */
-function siteHttpsTick() {
-  var arr = loadHttpsPending_();
-  if (!arr.length) { removeHttpsTrigger_(); return; }
-  var cfg = githubSiteCfg_();
-  var remaining = [];
-  arr.forEach(function (item) {
-    var resp = githubFetch_('https://api.github.com/repos/' + cfg.org + '/' + item.repo + '/pages', 'put', cfg.token, { https_enforced: true });
-    var code = resp.getResponseCode();
-    if (code === 204 || code === 200) { console.log('[site] HTTPS enforced for ' + item.repo); return; }
-    item.tries = (item.tries || 0) + 1;
-    // 404/400 = cert not provisioned yet — keep retrying up to ~3h.
-    if (item.tries >= 18) {
-      logEvent_('WARNING', 'site', 'HTTPS enforce gave up for ' + item.repo + ' after ' + item.tries + ' tries (last HTTP ' + code + ')');
-      return;
-    }
-    remaining.push(item);
-  });
-  saveHttpsPending_(remaining);
-  if (!remaining.length) removeHttpsTrigger_();
-}
 
 // ---------------------------------------------------- one-off manual onboard
 // A stalled OAuth "unverified app" cache on a participant's personal Google
