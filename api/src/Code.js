@@ -2695,21 +2695,17 @@ function deleteSiteDnsRecord_(slug) {
 }
 
 /** Point a repo's GitHub Pages site at a custom domain — GitHub rewrites the
- *  repo's CNAME file to match. Pages must already be enabled (bootstrap). */
+ *  repo's CNAME file to match. Pages must already be enabled (bootstrap).
+ *  NOTE: we set ONLY the cname here. Requesting https_enforced in this call
+ *  fails ("certificate does not exist yet") because the Let's Encrypt cert for
+ *  the new domain isn't provisioned until the domain is bound and DNS resolves.
+ *  HTTPS is enforced later, out of band, via enforceTeamSitesHttps(). */
 function githubSetPagesCname_(repo, domain) {
   var cfg = githubSiteCfg_();
   var url = 'https://api.github.com/repos/' + cfg.org + '/' + repo + '/pages';
-  var resp = githubFetch_(url, 'put', cfg.token, { cname: domain, https_enforced: true });
+  var resp = githubFetch_(url, 'put', cfg.token, { cname: domain });
   var code = resp.getResponseCode();
   if (code === 204 || code === 200) return true;
-  // 400 "HTTPS not yet available" — the TLS cert isn't provisioned yet. Retry
-  // without the enforce flag so the domain still binds; HTTPS flips on later.
-  if (code === 400) {
-    var r2 = githubFetch_(url, 'put', cfg.token, { cname: domain });
-    var c2 = r2.getResponseCode();
-    if (c2 === 204 || c2 === 200) return true;
-    resp = r2; code = c2;
-  }
   throw new Error('GitHub Pages cname failed for ' + repo + ': HTTP ' + code + ' ' + (resp.getContentText() || ''));
 }
 
@@ -3522,6 +3518,30 @@ function provisionAllTeamSites(projectId) {
     out.push(res);
   });
   console.log('[site] provision all → ' + JSON.stringify(out, null, 2));
+  return out;
+}
+
+/** EDITOR-RUNNABLE: flip "Enforce HTTPS" on every team site repo. Run this a few
+ *  minutes AFTER provisionAllTeamSites() (or a first project save), once GitHub
+ *  has provisioned the Let's Encrypt cert for each custom domain — before then
+ *  the API returns 404 "certificate does not exist yet", which we report as
+ *  not-ready so you can re-run later. Idempotent. */
+function enforceTeamSitesHttps() {
+  var cfg = githubSiteCfg_();
+  var out = [];
+  for (var slot = 0; slot < TEAM_LETTERS.length; slot++) {
+    var repo = githubRepoForSlot_(slot);
+    var res = { repo: repo, enforced: false, error: '' };
+    try {
+      var resp = githubFetch_('https://api.github.com/repos/' + cfg.org + '/' + repo + '/pages', 'put', cfg.token, { https_enforced: true });
+      var code = resp.getResponseCode();
+      if (code === 204 || code === 200) res.enforced = true;
+      else if (code === 404 || code === 400) res.error = 'cert not ready yet — re-run later';
+      else res.error = 'HTTP ' + code + ' ' + (resp.getContentText() || '');
+    } catch (e) { res.error = (e && e.message) || String(e); }
+    out.push(res);
+  }
+  console.log('[site] enforce https → ' + JSON.stringify(out, null, 2));
   return out;
 }
 
