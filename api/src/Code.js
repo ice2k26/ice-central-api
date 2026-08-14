@@ -111,8 +111,11 @@ var TABLES = {
   // that team's members — or an admin — may edit title/description/color.
   // New columns are appended LAST so existing rows stay column-aligned. 'video'
   // is a Drive URL; 'description' is the short one, 'fullDescription' the long
-  // one; 'website' + 'websiteOk' (reachability flag, '1'/'' set on save).
-  team_projects: ['id', 'slot', 'title', 'description', 'color', 'updatedBy', 'updatedAt', 'video', 'fullDescription', 'website', 'websiteOk'],
+  // one; 'website' is the auto-generated project site URL (https://{slug}.
+  // designthinking.lk, derived from the title) and 'websiteOk' its reachability
+  // flag; 'siteSlug' is the last-provisioned slug (drives DNS/Pages rewiring on
+  // a rename — see provisionTeamSite_).
+  team_projects: ['id', 'slot', 'title', 'description', 'color', 'updatedBy', 'updatedAt', 'video', 'fullDescription', 'website', 'websiteOk', 'siteSlug'],
   messages: ['id', 'senderId', 'receiverId', 'content', 'read', 'createdAt'],
   announcements: ['id', 'title', 'content', 'type', 'authorId', 'isPinned', 'isPublished', 'createdAt', 'updatedAt'],
   // Admin wallet broadcasts — the message shown as the card's LATEST field and
@@ -325,7 +328,7 @@ var AUTH_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
-  admin_github_backfill: 1, admin_logs: 1,
+  admin_github_backfill: 1, admin_logs: 1, admin_pulse: 1,
   wallet_link: 1, project_wallet_link: 1,
 };
 
@@ -342,7 +345,7 @@ var ADMIN_REQUIRED = {
   admin_assign_team: 1, admin_set_score: 1, admin_wallet_push: 1, wallet_push_history: 1,
   admin_invite: 1, admin_resend_invite: 1, admin_revoke_invite: 1,
   admin_list_projects: 1, admin_create_project: 1, admin_update_project: 1, admin_user_projects: 1,
-  admin_github_backfill: 1, admin_logs: 1,
+  admin_github_backfill: 1, admin_logs: 1, admin_pulse: 1,
 };
 
 // Mentors and admins may post announcements; edit/delete is author-or-admin.
@@ -1162,7 +1165,12 @@ var ACTIONS = {
     if (!proj) return { ok: false, error: 'notfound', message: 'Project not found.' };
     var patch = { updatedBy: ctx.user.id, updatedAt: new Date().toISOString() };
     if (params.title !== undefined) {
-      var title = clean_(params.title, 80);
+      // Titles are capped at two words / a single space — the site slug is the
+      // words concatenated. Collapse whitespace and keep at most the first two
+      // words (the client blocks a second space; this is the server backstop).
+      var title = clean_(params.title, 80).replace(/\s+/g, ' ').trim();
+      var words = title.split(' ');
+      if (words.length > 2) title = words[0] + ' ' + words[1];
       if (!title) return { ok: false, error: 'validation', message: 'Title cannot be empty.' };
       patch.title = title;
     }
@@ -1181,19 +1189,42 @@ var ACTIONS = {
       patch.video = vid;
     }
     if (params.fullDescription !== undefined) patch.fullDescription = clean_(params.fullDescription, 600);
-    // Website: normalise, then curl-check it. A broken URL still saves but is
-    // flagged (websiteOk='') so the view can show a warning.
-    if (params.website !== undefined) {
-      var web = clean_(params.website, 300);
-      if (web && !/^https?:\/\//i.test(web)) web = 'https://' + web;
-      patch.website = web;
-      patch.websiteOk = web ? (urlReachable_(web) ? '1' : '') : '';
+    // The website is NOT client-editable — it's auto-provisioned from the title:
+    // {slug}.designthinking.lk, served by the team's GitHub Pages repo. When the
+    // derived slug moves (including the very first save, siteSlug empty) we
+    // rewire DNS + the repo's Pages domain. A provisioning failure still saves
+    // the rest of the edit and returns a soft warning; the next save retries.
+    var siteWarning = '';
+    if (patch.title !== undefined) {
+      var newSlug = slugForTitle_(patch.title);
+      var oldSlug = proj.siteSlug || '';
+      if (!newSlug) return { ok: false, error: 'validation', message: 'Title needs at least one letter or number.' };
+      if (newSlug !== oldSlug) {
+        if (reservedSlugs_()[newSlug]) return { ok: false, error: 'validation', message: 'That name is reserved — pick another.' };
+        // A GitHub Pages custom domain is globally unique — refuse if another
+        // team already holds this slug.
+        var clash = false;
+        readTeamProjects_().forEach(function (o) { if (o.slot !== slot && (o.siteSlug || '') === newSlug) clash = true; });
+        if (clash) return { ok: false, error: 'validation', message: 'Another team already uses that site name — pick another.' };
+        try {
+          var site = provisionTeamSite_(slot, newSlug, oldSlug);
+          patch.website = site.url;
+          patch.websiteOk = '1';
+          patch.siteSlug = newSlug;
+        } catch (e) {
+          console.error('[site] provision failed for slot ' + slot + ': ' + ((e && e.stack) || e));
+          logEvent_('WARNING', 'site', 'provision failed for slot ' + slot + ' (' + newSlug + '): ' + (e && e.message || e));
+          siteWarning = 'Saved — but the project website could not be set up. It will retry on your next save.';
+        }
+      }
     }
     updateRowById_('team_projects', proj.id, patch);
     // push the change to any saved project business cards right away (Google
     // instant; Apple picks it up on its next scheduler tick)
     try { walletRefreshProjectForTeam_(team); } catch (e) { console.warn('project card refresh failed: ' + (e && e.message || e)); }
-    return { teamProjects: readTeamProjects_() };
+    var res = { teamProjects: readTeamProjects_() };
+    if (siteWarning) res.warning = siteWarning;
+    return res;
   },
 
   /** Upload a team's pitch video to the project's Drive uploads folder and save
@@ -1745,6 +1776,106 @@ var ACTIONS = {
     rows.sort(function (a, b) { return (a.ts < b.ts) ? 1 : (a.ts > b.ts ? -1 : 0); }); // newest first
     var limit = Math.min(Number(params.limit) || 200, 500);
     return { logs: rows.slice(0, limit) };
+  },
+
+  /** Live snapshot for the admin Systems Map (#/systemmap). Aggregates real,
+   *  non-sensitive activity so the diagram can show live counts, which services
+   *  are currently active, and recent data flows mapped to the diagram's edges.
+   *  Read-only; no message bodies or personal data leave the server. */
+  admin_pulse: function (params, ctx) {
+    var now = Date.now();
+    function readSafe(name) { try { return readTable_(name); } catch (e) { return []; } }
+
+    var users    = readSafe('users');
+    var teams    = readSafe('teams');
+    var projects = readSafe('team_projects');
+    var invites  = readSafe('invites');
+    var posts    = readSafe('team_posts');
+    var links    = readSafe('team_links');
+    var anns     = readSafe('announcements');
+    var pushes   = readSafe('wallet_pushes');
+    var tools    = readSafe('tools');
+    var msgs     = readSafe('messages');
+    var logs = [];
+    try { logs = readTable_('logs', true); } catch (e) { logs = []; }
+
+    var videos = users.filter(function (u) { return u.video; }).length +
+                 projects.filter(function (p) { return p.video; }).length;
+    var invitesPending = invites.filter(function (i) {
+      return !findUserByEmail_(String(i.email).toLowerCase());
+    }).length;
+
+    var counts = {
+      online: onlineIds_().length,
+      members: users.length,
+      teams: teams.length,
+      projects: projects.filter(function (p) { return p.title; }).length,
+      invitesPending: invitesPending,
+      videos: videos,
+      tools: tools.length,
+      messages: msgs.length,
+      githubInvited: users.filter(function (u) { return u.githubInvited; }).length,
+      walletPushes: pushes.length,
+    };
+
+    // ---- recent activity, time-merged, each mapped to a diagram edge ----
+    // Node ids below MUST match the web diagram (initSystemMap in app.js):
+    // client, edge, pages, auth, api, applefn, sheets, drive, admin, gmail,
+    // cal, gwallet, ghorg.
+    var ev = [];
+    function add(ts, flow, from, to, label) {
+      if (!ts) return;
+      var t = Date.parse(ts);
+      if (!t) return;
+      ev.push({ ts: new Date(t).toISOString(), flow: flow, from: from, to: to, label: label });
+    }
+    users.forEach(function (u) {
+      add(u.createdAt, 'auth', 'api', 'admin', 'New member joined');
+      if (u.updatedAt && u.updatedAt !== u.createdAt) add(u.updatedAt, 'data', 'api', 'sheets', 'Profile updated');
+      if (u.video) add(u.updatedAt || u.createdAt, 'data', 'api', 'drive', 'Intro video uploaded');
+      if (u.githubInvited) add(u.updatedAt || u.createdAt, 'sync', 'api', 'ghorg', 'GitHub invite');
+    });
+    invites.forEach(function (i) { add(i.lastSentAt || i.createdAt, 'email', 'api', 'gmail', 'Invitation sent'); });
+    teams.forEach(function (t) { add(t.createdAt, 'data', 'api', 'sheets', 'Team created'); });
+    posts.forEach(function (p) { add(p.createdAt, 'data', 'api', 'sheets', 'Team update posted'); });
+    links.forEach(function (l) { add(l.createdAt, 'data', 'api', 'sheets', 'Resource shared'); });
+    projects.forEach(function (p) {
+      if (p.video) add(p.updatedAt, 'data', 'api', 'drive', 'Project video uploaded');
+      else if (p.title) add(p.updatedAt, 'data', 'api', 'sheets', 'Project card edited');
+    });
+    anns.forEach(function (a) { add(a.createdAt, 'data', 'api', 'sheets', 'Announcement published'); });
+    pushes.forEach(function (w) {
+      add(w.sentAt, 'pass', 'api', 'gwallet', 'Wallet card updated');
+      add(w.sentAt, 'pass', 'api', 'applefn', 'Apple pass signed');
+    });
+    logs.forEach(function (l) {
+      var sev = String(l.severity).toUpperCase();
+      if (sev === 'ERROR' || sev === 'CRITICAL') add(l.ts, 'error', 'client', 'api', 'Error · ' + String(l.action || ''));
+    });
+
+    ev.sort(function (a, b) { return a.ts < b.ts ? 1 : (a.ts > b.ts ? -1 : 0); }); // newest first
+    var recent = ev.slice(0, 40);
+
+    // ---- honest, signal-derived health ----
+    // This action running at all proves api + sheets are reachable. Every other
+    // node is "active" when it saw traffic in the recent window, else "idle".
+    var WINDOW = 30 * 60 * 1000; // 30 min
+    var active = {};
+    recent.forEach(function (e) {
+      if (now - Date.parse(e.ts) < WINDOW) { active[e.from] = 1; active[e.to] = 1; }
+    });
+    var recentErr = logs.some(function (l) {
+      var s = String(l.severity).toUpperCase();
+      return (s === 'ERROR' || s === 'CRITICAL') && (now - Date.parse(l.ts) < WINDOW);
+    });
+
+    return {
+      now: new Date().toISOString(),
+      counts: counts,
+      recent: recent,
+      active: Object.keys(active),
+      health: { api: recentErr ? 'warn' : 'up', sheets: 'up', drive: 'up' },
+    };
   },
 
   admin_invite: function (params, ctx) {
@@ -2445,6 +2576,181 @@ function createDnsRecord_(slug) {
   throw new Error('Cloudflare DNS create failed: ' + msg);
 }
 
+// -------------------------------------------------- team project websites
+// Each of the six workshop projects gets an auto-provisioned static site at
+// {slug}.designthinking.lk, served by a per-team GitHub Pages repo
+// (team-a-website … team-f-website in the designthinking-lk org). The slug is
+// derived from the project title (words concatenated, e.g. "Smart Mobility" →
+// smartmobility); renaming rewires DNS + the repo's Pages custom domain.
+// Config in Script Properties:
+//   GITHUB_TOKEN — reused from org invites; for the site helpers it also needs
+//                  Administration + Contents + Pages: write on the org.
+//   CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID — reused from createDnsRecord_.
+// CRITICAL: team-site DNS records are grey-cloud (proxied:false). A proxied
+// record would be swallowed by the central-web Worker (infra/worker.js), which
+// reverse-proxies EVERY proxied *.designthinking.lk to the ICE app — a grey
+// record instead hits GitHub Pages directly so the team repo's own site shows.
+var SITE_RESERVED_SLUGS = ['www', 'card', 'api', 'ice', 'ice2026', 'ice2025', 'app', 'mail', 'admin'];
+var SITE_APEX = '.designthinking.lk';
+
+/** GitHub Pages repo name for project slot i: team-a-website … team-f-website. */
+function githubRepoForSlot_(slot) {
+  var letter = TEAM_LETTERS[slot];
+  return letter ? 'team-' + letter.toLowerCase() + '-website' : '';
+}
+
+/** Derive the site slug from a project title: lowercase, keep only a–z0–9,
+ *  spaces (and everything else) removed. "Smart Mobility" → "smartmobility".
+ *  '' if nothing usable remains. */
+function slugForTitle_(title) {
+  return String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** Every slug a team site may NOT claim: the static reserved list plus each
+ *  project slug in the registry (those are proxied app subdomains). */
+function reservedSlugs_() {
+  var set = {};
+  SITE_RESERVED_SLUGS.forEach(function (s) { set[s] = 1; });
+  try {
+    readRegistry_('projects').forEach(function (p) { if (p.id) set[String(p.id).toLowerCase()] = 1; });
+  } catch (e) { /* registry unreadable — fall back to the static list */ }
+  return set;
+}
+
+/** GitHub token + org for the site helpers (same property as org invites). */
+function githubSiteCfg_() {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('GITHUB_TOKEN');
+  if (!token) throw new Error('GitHub not configured — set GITHUB_TOKEN in Script Properties.');
+  return { token: token, org: props.getProperty('GITHUB_ORG') || GITHUB_DEFAULT_ORG };
+}
+
+/** Thin UrlFetch wrapper for the GitHub REST API (muted exceptions). */
+function githubFetch_(url, method, token, payload) {
+  var opts = {
+    method: method,
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'ice-central-api',
+    },
+    muteHttpExceptions: true,
+  };
+  if (payload !== undefined) { opts.contentType = 'application/json'; opts.payload = JSON.stringify(payload); }
+  return UrlFetchApp.fetch(url, opts);
+}
+
+/** DNS-only (grey-cloud) CNAME {slug}.designthinking.lk -> designthinking-lk
+ *  .github.io. Grey is REQUIRED (see the section header). Idempotent — an
+ *  existing record counts as success. */
+function createSiteDnsRecord_(slug) {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('CLOUDFLARE_API_TOKEN');
+  var zone = props.getProperty('CLOUDFLARE_ZONE_ID');
+  if (!token || !zone) {
+    throw new Error('Cloudflare not configured — set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID in Script Properties.');
+  }
+  var resp = UrlFetchApp.fetch(
+    'https://api.cloudflare.com/client/v4/zones/' + zone + '/dns_records',
+    {
+      method: 'post', contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true,
+      payload: JSON.stringify({
+        type: 'CNAME', name: slug + SITE_APEX, content: 'designthinking-lk.github.io',
+        proxied: false, comment: 'ICE team site ' + slug + ' (auto-created)',
+      }),
+    }
+  );
+  var body = {};
+  try { body = JSON.parse(resp.getContentText() || '{}'); } catch (e) { body = {}; }
+  if (body.success) return true;
+  var errs = body.errors || [];
+  for (var i = 0; i < errs.length; i++) if (errs[i].code === 81053 || errs[i].code === 81057) return true;
+  var msg = errs.length ? (errs[0].code + ' ' + errs[0].message) : ('HTTP ' + resp.getResponseCode());
+  throw new Error('Cloudflare DNS create failed: ' + msg);
+}
+
+/** Delete any CNAME for {slug}.designthinking.lk (rename cleanup). Best-effort —
+ *  a missing record or an API hiccup is swallowed. */
+function deleteSiteDnsRecord_(slug) {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('CLOUDFLARE_API_TOKEN');
+  var zone = props.getProperty('CLOUDFLARE_ZONE_ID');
+  if (!token || !zone || !slug) return;
+  try {
+    var name = slug + SITE_APEX;
+    var listResp = UrlFetchApp.fetch(
+      'https://api.cloudflare.com/client/v4/zones/' + zone + '/dns_records?type=CNAME&name=' + encodeURIComponent(name),
+      { method: 'get', headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true }
+    );
+    var body = JSON.parse(listResp.getContentText() || '{}');
+    (body.result || []).forEach(function (rec) {
+      UrlFetchApp.fetch(
+        'https://api.cloudflare.com/client/v4/zones/' + zone + '/dns_records/' + rec.id,
+        { method: 'delete', headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true }
+      );
+    });
+  } catch (e) { console.warn('[site] DNS delete failed for ' + slug + ': ' + (e && e.message || e)); }
+}
+
+/** Point a repo's GitHub Pages site at a custom domain — GitHub rewrites the
+ *  repo's CNAME file to match. Pages must already be enabled (bootstrap). */
+function githubSetPagesCname_(repo, domain) {
+  var cfg = githubSiteCfg_();
+  var url = 'https://api.github.com/repos/' + cfg.org + '/' + repo + '/pages';
+  var resp = githubFetch_(url, 'put', cfg.token, { cname: domain, https_enforced: true });
+  var code = resp.getResponseCode();
+  if (code === 204 || code === 200) return true;
+  // 400 "HTTPS not yet available" — the TLS cert isn't provisioned yet. Retry
+  // without the enforce flag so the domain still binds; HTTPS flips on later.
+  if (code === 400) {
+    var r2 = githubFetch_(url, 'put', cfg.token, { cname: domain });
+    var c2 = r2.getResponseCode();
+    if (c2 === 204 || c2 === 200) return true;
+    resp = r2; code = c2;
+  }
+  throw new Error('GitHub Pages cname failed for ' + repo + ': HTTP ' + code + ' ' + (resp.getContentText() || ''));
+}
+
+/** Wire project slot `slot`'s team site to `newSlug`: create the grey-cloud DNS
+ *  record, set the repo's Pages custom domain, and delete the previous slug's
+ *  DNS record on a rename. Returns { url, slug }. Throws on a hard failure (the
+ *  caller saves the title anyway and surfaces a soft warning). */
+function provisionTeamSite_(slot, newSlug, oldSlug) {
+  var repo = githubRepoForSlot_(slot);
+  if (!repo) throw new Error('No team repo for project slot ' + slot + '.');
+  var domain = newSlug + SITE_APEX;
+  createSiteDnsRecord_(newSlug);
+  githubSetPagesCname_(repo, domain);
+  if (oldSlug && oldSlug !== newSlug) deleteSiteDnsRecord_(oldSlug);
+  return { url: 'https://' + domain, slug: newSlug };
+}
+
+/** Branded placeholder page seeded into a fresh team repo (bootstrap). */
+function teamSitePlaceholderHtml_(title, desc, letter) {
+  var e = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  var repo = 'team-' + String(letter).toLowerCase() + '-website';
+  return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>' + e(title) + ' — ICE</title>' +
+    '<style>' +
+    ':root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;height:100%}' +
+    'body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#fff;' +
+    'background:radial-gradient(120% 120% at 20% 0%,#6100FF 0%,#0b0a1a 55%);' +
+    'display:flex;align-items:center;justify-content:center;padding:32px;text-align:center}' +
+    'main{max-width:640px}.kicker{letter-spacing:.28em;text-transform:uppercase;font-size:13px;' +
+    'color:rgba(255,255,255,.7);margin:0 0 18px}h1{font-size:clamp(34px,7vw,64px);margin:0 0 14px;line-height:1.05}' +
+    '.lead{font-size:clamp(16px,2.4vw,21px);color:rgba(255,255,255,.85);margin:0 0 28px}' +
+    '.foot{font-size:13px;color:rgba(255,255,255,.55)}code{background:rgba(255,255,255,.12);padding:2px 7px;border-radius:6px}' +
+    '</style></head><body><main>' +
+    '<p class="kicker">ICE · Team ' + e(letter) + '</p>' +
+    '<h1>' + e(title) + '</h1>' +
+    (desc ? '<p class="lead">' + e(desc) + '</p>' : '') +
+    '<p class="foot">This is your team\'s starter site. Push your own code to <code>' + e(repo) + '</code> to replace it.</p>' +
+    '</main></body></html>';
+}
+
 /** Directory row for a personal email, or null. */
 function findDirectory_(email) {
   var key = String(email || '').toLowerCase();
@@ -3131,6 +3437,262 @@ function runGithubBackfill(projectId) {
   var res = ACTIONS.admin_github_backfill({}, { isAdmin: true });
   console.log('[github] backfill %s → %s', PROJ.id, JSON.stringify(res));
   return res;
+}
+
+/** EDITOR-RUNNABLE: one-time bootstrap of the six team website repos. For each
+ *  of team-a-website … team-f-website in the org: create the repo (public,
+ *  auto-init), seed a branded placeholder index.html from that team's current
+ *  project title/description (only if the repo has none — never clobbers team
+ *  content), and enable GitHub Pages from main/root. Fully idempotent, so it's
+ *  safe to re-run. The Pages custom domain is NOT set here — that happens on the
+ *  first project save (provisionTeamSite_). Needs GITHUB_TOKEN with
+ *  Administration + Contents + Pages: write. Counts go to the execution log.
+ *  Change projectId to bootstrap a non-default project. */
+function bootstrapTeamWebsites(projectId) {
+  PROJ = getProject_(projectId || DEFAULT_PROJECT);
+  if (!PROJ) throw new Error('Unknown project: ' + (projectId || DEFAULT_PROJECT));
+  var cfg = githubSiteCfg_();
+  var projects = readTeamProjects_();
+  var out = [];
+  for (var slot = 0; slot < TEAM_LETTERS.length; slot++) {
+    var repo = githubRepoForSlot_(slot);
+    var proj = null;
+    projects.forEach(function (p) { if (p.slot === slot) proj = p; });
+    var title = (proj && proj.title) || ('Team ' + TEAM_LETTERS[slot] + ' project');
+    var desc = (proj && proj.description) || '';
+    var status = { repo: repo, created: false, seeded: false, pages: false, error: '' };
+    try {
+      // 1. create the repo (422 = already exists → fine)
+      var base = 'https://api.github.com/repos/' + cfg.org + '/' + repo;
+      var cr = githubFetch_('https://api.github.com/orgs/' + cfg.org + '/repos', 'post', cfg.token, {
+        name: repo, private: false, auto_init: true,
+        description: 'Auto-provisioned ICE team website — ' + title,
+      });
+      var crc = cr.getResponseCode();
+      if (crc === 201) status.created = true;
+      else if (crc !== 422) throw new Error('repo create HTTP ' + crc + ' ' + cr.getContentText());
+      // 2. seed the placeholder only when the repo has no index.html yet
+      var getIdx = githubFetch_(base + '/contents/index.html', 'get', cfg.token);
+      if (getIdx.getResponseCode() === 404) {
+        var html = teamSitePlaceholderHtml_(title, desc, TEAM_LETTERS[slot]);
+        var put = githubFetch_(base + '/contents/index.html', 'put', cfg.token, {
+          message: 'Seed ICE placeholder site', content: Utilities.base64Encode(html, Utilities.Charset.UTF_8),
+        });
+        var pc = put.getResponseCode();
+        if (pc === 201 || pc === 200) status.seeded = true;
+        else throw new Error('seed index.html HTTP ' + pc + ' ' + put.getContentText());
+      }
+      // 3. enable Pages from main/root (409 = already enabled → fine)
+      var pg = githubFetch_(base + '/pages', 'post', cfg.token, { source: { branch: 'main', path: '/' } });
+      var pgc = pg.getResponseCode();
+      if (pgc === 201 || pgc === 409) status.pages = true;
+      else throw new Error('pages enable HTTP ' + pgc + ' ' + pg.getContentText());
+    } catch (e) {
+      status.error = (e && e.message) || String(e);
+    }
+    out.push(status);
+  }
+  console.log('[site] bootstrap → ' + JSON.stringify(out, null, 2));
+  return out;
+}
+
+// ---------------------------------------------------- one-off manual onboard
+// A stalled OAuth "unverified app" cache on a participant's personal Google
+// account can block them from ever reaching the sign-in that would register
+// them. This unblocks such a person WITHOUT registering them for real, so they
+// still get the normal onboarding card and a properly-filled profile:
+//
+//   1. Mint their firstname@designthinking.lk workshop account (emailing the
+//      temp password to their personal inbox). Signing in with THAT is a
+//      managed-domain login that never hits the unverified-app screen.
+//   2. Link personal <-> workspace in the cross-project directory, so the
+//      workspace login resolves back to their personal identity, and so the
+//      later register reuses this account instead of minting a duplicate.
+//   3. Seed an invites allowlist row (register refuses un-invited emails) so
+//      the onboarding card lets them through without an access code.
+//
+// It does NOT write a users row. When they log in and complete the onboarding
+// card, the normal `register` action writes that row (GitHub enforced, org
+// invite fired, profile filled), reusing the account minted in step 1. Then an
+// admin assigns them to a team the normal way.
+//
+// The dry-run and the real run call the SAME core (onboardMemberCore_) with an
+// identical opts object; only the `dryRun` flag differs. Dry run performs no
+// writes: nothing is minted, no invite/directory row is written, and no email
+// is sent — it just reports the exact plan (including the workEmail handle that
+// WOULD be minted, previewed read-only).
+
+/** Read-only preview of the handle provisionWorkspaceAccount_ would mint, using
+ *  the same candidate order (first@, then first.last@ / numbered on collision).
+ *  Tests each candidate with AdminDirectory.Users.get — a thrown 404 means the
+ *  handle is free, so that's the one insert() would take. Returns '' if the
+ *  Admin SDK is unavailable or no free handle is found in the tried range. */
+function previewWorkspaceHandle_(first, last) {
+  if (typeof AdminDirectory === 'undefined') return '';
+  var f = handlePart_(first);
+  var l = handlePart_(last);
+  if (!f) return '';
+  var candidates = [f];
+  if (l) {
+    candidates.push(f + '.' + l);
+    for (var n = 2; n <= 20; n++) candidates.push(f + '.' + l + n);
+  } else {
+    for (var n2 = 2; n2 <= 20; n2++) candidates.push(f + n2);
+  }
+  for (var i = 0; i < candidates.length; i++) {
+    var primaryEmail = candidates[i] + '@' + WORKSPACE_DOMAIN;
+    try {
+      AdminDirectory.Users.get(primaryEmail); // found → taken, try the next
+    } catch (err) {
+      return primaryEmail; // 404 (or any not-found) → this handle is free
+    }
+  }
+  return '';
+}
+
+/** Shared core for the manual onboard. opts: { projectId, email, firstName,
+ *  lastName, role, dryRun }. With dryRun:true it only inspects and returns the
+ *  plan; with dryRun:false it performs the identical steps for real. */
+function onboardMemberCore_(opts) {
+  PROJ = getProject_(opts.projectId || DEFAULT_PROJECT);
+  if (!PROJ) throw new Error('Unknown project: ' + (opts.projectId || DEFAULT_PROJECT));
+
+  var email = String(opts.email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) throw new Error('A valid personal email is required. Got: ' + email);
+  var first = clean_(opts.firstName, 50);
+  var last = clean_(opts.lastName, 50);
+  var name = (first + ' ' + last).trim();
+  if (!name) throw new Error('firstName (and ideally lastName) is required.');
+  var role = String(opts.role || 'participant').trim() || 'participant';
+
+  var plan = {
+    dryRun: !!opts.dryRun,
+    project: PROJ.id,
+    email: email,
+    name: name,
+    role: role,
+    provisionAccounts: !!PROJ.provisionAccounts,
+  };
+
+  // Already a full member? Never disturb a real registration — stop here.
+  var existing = findUserByEmail_(email);
+  if (existing) {
+    plan.action = 'already-registered';
+    plan.workEmail = existing.workEmail || '';
+    plan.note = 'A users row already exists — this person has finished onboarding.';
+    console.log('[onboard] %s', JSON.stringify(plan));
+    return plan;
+  }
+
+  // Workspace account: reuse the one already linked in the directory (a re-run,
+  // or a returning person from an earlier workshop); otherwise mint fresh,
+  // unless provisioning is switched off for this project. We never write a users
+  // row here — that is `register`'s job when THEY complete the onboarding card.
+  var dir = findDirectory_(email);
+  var workEmail = (dir && dir.workEmail) || '';
+  var willMint = !workEmail && PROJ.provisionAccounts;
+  if (workEmail) {
+    plan.accountPlan = 'reuse-existing (' + workEmail + ')';
+  } else if (willMint) {
+    plan.accountPlan = 'mint-new';
+    plan.workEmailPreview = previewWorkspaceHandle_(first, last) ||
+      '(could not preview — Admin SDK unavailable or range exhausted)';
+    plan.note = 'Actual handle is chosen at insert time; a collision between now and the real run may bump the number.';
+  } else {
+    plan.accountPlan = 'none (provisionAccounts is off) — no managed login possible for this project';
+  }
+
+  // Allowlist: register refuses un-invited emails. Seed an invites row keyed by
+  // the PERSONAL email (register resolves the workspace login back to it via the
+  // directory) so the onboarding card lets them through with no access code.
+  // findInviteByEmail_ also lazily creates the invites tab if it's missing.
+  var invite = findInviteByEmail_(email);
+  plan.invitePlan = invite ? 'already-invited (' + invite.role + ')' : 'add invites row (' + role + ')';
+
+  if (opts.dryRun) {
+    plan.action = 'dry-run — nothing minted, no invite/directory row written, no email sent';
+    console.log('[onboard] %s', JSON.stringify(plan, null, 2));
+    return plan;
+  }
+
+  // ---- real run ----
+  if (willMint) {
+    workEmail = provisionWorkspaceAccount_(first, last, email); // mints + emails the temp password
+    if (!workEmail) {
+      throw new Error('Could not mint the @designthinking.lk account — check the Admin SDK setup and the execution logs.');
+    }
+  } else if (workEmail) {
+    sendWorkspaceWelcomeBack_(email, first, workEmail); // returning account — remind them it works here
+  }
+
+  // Link personal <-> workspace so the workspace login resolves to this person
+  // (canonicalEmail_) and register reuses the account. No profile snapshot yet —
+  // they haven't registered; register writes it when they finish the card.
+  upsertDirectory_(email, { workEmail: workEmail, name: name, lastProjectId: PROJ.id });
+
+  // Seed the allowlist row unless they're already invited.
+  if (!invite) {
+    var now = new Date().toISOString();
+    appendRow_('invites', {
+      id: Utilities.getUuid(),
+      email: email,
+      role: role,
+      invitedBy: 'manual-onboard',
+      createdAt: now,
+      lastSentAt: '',
+      sendCount: 0,
+    });
+  }
+
+  logEvent_('INFO', 'manual_onboard', name + ' account-onboarded (' + role + '); awaiting profile', email);
+  plan.action = 'account-onboarded — they complete the profile card on first login, then get a team';
+  plan.workEmail = workEmail;
+  console.log('[onboard] %s', JSON.stringify(plan));
+  return plan;
+}
+
+// The person being onboarded. Edit these before running if the name is wrong —
+// firstName decides the minted firstname@designthinking.lk handle, so verify it
+// with the dry run first. They complete their profile (and pick a team) later.
+var ONBOARD_TARGET = {
+  projectId: DEFAULT_PROJECT,        // 'ice2026'
+  email: 'samithadeshan47@gmail.com',
+  firstName: 'Samitha',
+  lastName: 'Deshan',
+  role: 'participant',
+};
+
+/** EDITOR-RUNNABLE (Run ▸ dryRunOnboardMember): preview the manual onboard for
+ *  ONBOARD_TARGET without changing anything. Reports the workEmail handle that
+ *  would be minted. Run this first and read the execution log. */
+function dryRunOnboardMember() {
+  var opts = {
+    projectId: ONBOARD_TARGET.projectId,
+    email: ONBOARD_TARGET.email,
+    firstName: ONBOARD_TARGET.firstName,
+    lastName: ONBOARD_TARGET.lastName,
+    role: ONBOARD_TARGET.role,
+    dryRun: true,
+  };
+  return onboardMemberCore_(opts);
+}
+
+/** EDITOR-RUNNABLE (Run ▸ onboardMember): actually onboard ONBOARD_TARGET —
+ *  mints their @designthinking.lk account (emails the temp password), links the
+ *  directory, and seeds the invites allowlist. NO users row is written: they log
+ *  in with the workspace account, complete the onboarding card (which runs
+ *  register and fills their profile), then an admin assigns their team. Same
+ *  opts as dryRunOnboardMember, only dryRun flips to false. Run the dry run first. */
+function onboardMember() {
+  var opts = {
+    projectId: ONBOARD_TARGET.projectId,
+    email: ONBOARD_TARGET.email,
+    firstName: ONBOARD_TARGET.firstName,
+    lastName: ONBOARD_TARGET.lastName,
+    role: ONBOARD_TARGET.role,
+    dryRun: false,
+  };
+  return onboardMemberCore_(opts);
 }
 
 /** Email the new workshop credentials to the address the person signed in with. */
