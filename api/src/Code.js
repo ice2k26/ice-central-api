@@ -3496,6 +3496,35 @@ function bootstrapTeamWebsites(projectId) {
   return out;
 }
 
+/** EDITOR-RUNNABLE: provision (or re-provision) the team site for EVERY project
+ *  from its current title — the same wiring team_project_update does on save
+ *  (grey-cloud DNS + the repo's Pages custom domain + CNAME file), and persists
+ *  website/websiteOk/siteSlug back to the sheet. Idempotent, so safe to re-run;
+ *  handy for backfilling the six default projects or testing without the UI.
+ *  Skips empty/reserved slugs. Change projectId for a non-default project. */
+function provisionAllTeamSites(projectId) {
+  PROJ = getProject_(projectId || DEFAULT_PROJECT);
+  if (!PROJ) throw new Error('Unknown project: ' + (projectId || DEFAULT_PROJECT));
+  var reserved = reservedSlugs_();
+  var out = [];
+  readTeamProjects_().forEach(function (proj) {
+    var newSlug = slugForTitle_(proj.title);
+    var res = { slot: proj.slot, title: proj.title, slug: newSlug, ok: false, error: '' };
+    if (!newSlug) { res.error = 'empty slug'; out.push(res); return; }
+    if (reserved[newSlug]) { res.error = 'reserved slug'; out.push(res); return; }
+    try {
+      var site = provisionTeamSite_(proj.slot, newSlug, proj.siteSlug || '');
+      updateRowById_('team_projects', proj.id, { website: site.url, websiteOk: '1', siteSlug: newSlug });
+      res.ok = true; res.url = site.url;
+    } catch (e) {
+      res.error = (e && e.message) || String(e);
+    }
+    out.push(res);
+  });
+  console.log('[site] provision all → ' + JSON.stringify(out, null, 2));
+  return out;
+}
+
 // ---------------------------------------------------- one-off manual onboard
 // A stalled OAuth "unverified app" cache on a participant's personal Google
 // account can block them from ever reaching the sign-in that would register
